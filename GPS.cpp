@@ -50,9 +50,9 @@ void setComm(int baudRate, bool dtrEnable = false) {
 
 
 DWORD bytesRead;
-uchar response[256];
+uchar response[512];
 
-bool motoCmd(const void* cmd, int len, void* pResponse = response, int responseLen = sizeof(response)) {
+bool motoCmd(const void* cmd, int len, void* pResponse = response, int responseLen = -1) {
   uchar sum = 0;
   for (int p = 0; p < len; ++p) 
     sum ^= ((char*)cmd)[p]; // XOR of message bytes after @@ and before checksum
@@ -60,9 +60,10 @@ bool motoCmd(const void* cmd, int len, void* pResponse = response, int responseL
   uchar send[16] = "@@";
   memcpy(send + 2, cmd, len);
   send[2 + len] = sum;  // checksum
-  memcpy(send + 3 + len, "\r\n", 2); // CRLF
+  memcpy(send + 2 + len + 1, "\r\n", 2); // CRLF
 
-  WriteFile(hCom, send, len + 5, NULL, NULL);
+  WriteFile(hCom, send, 2 + len + 3, NULL, NULL);
+  if (responseLen < 0) responseLen = 2 + len + 3;
   bool OK = ReadFile(hCom, pResponse, responseLen, &bytesRead, NULL);
   ((char*)(pResponse))[bytesRead] = 0;
   return OK;
@@ -139,84 +140,121 @@ typedef struct {
 } int24;
 
 struct {
-  char subframe;  // 5: pg 1..25;  4: 2..5, 7..10. 25
-  char page;
+  char cmd[2];    // Cb
+  uchar subframe;  // 5: pg 1..25;  4: 2..5, 7..10. 25
+  uchar page;
 
   // Big endian
   struct {
-    char dataID : 2;
-    char svID   : 6;
+    uchar dataID : 2;
+    uchar svID   : 6;
   };
-  short eccentricity; // 2^-16
+  //                // scale (2^N LSB)
+  unsigned short eccentric;  // -21      Eccentricity
 
-  char  toa;          //  12
-  short deltaI;       // -14
+  uchar toa;        //  12      Time of Applicability (seconds)
+  short deltaI;     // -19      - i0 = 0.3 semi-circles; Inclination Angle at Reference Time
 
-  short Ohmega;       // -15
-  char  svHealth; 
+  short OmegaDot;   // -38      Rate of Right Ascen: semi-circles/sec
+  uchar svHealth;  
   
-  int24 rootA;        // -4
-  int24 ohm0;         // -15
-  int24 ohmeg;        // -15
-  int24 M0;           // -15
+  int24 rootA;      // -11      Square Root of the Semi-Major Axis
+  int24 Omega0;     // -23      Longitude of Ascending Node of Orbit Plane at Weekly Epoch 
+  int24 omega;      // -23      Argument of Perigee
+  int24 M0;         // -23      Mean Anom      
   struct {
-    char af0msb;      // -20
-    char af1msb;      // -37
+    char af0msb;    // -20      SV Clock Bias Correction Coefficient
+    char af1msb;    // -38      SV Clock Bias Correction Coefficient
     char af1lsb :  3;
     char af0lsb :  3;
     char t      :  2;
   };
-} almPageMsg; // s/b 26 bytes + 7 (@@Cb    Chk CR LF) = 33 byte messages
+} almMsg = { {'C', 'b'}, }; // s/b 28 bytes + 5 (@@ ... Chk CR LF) = 33 byte messages
 
+// fields in .alm file order:
+const void* pField[12] = { &almMsg.svID, &almMsg.svHealth, &almMsg.eccentric, &almMsg.toa,  
+                           &almMsg.deltaI, &almMsg.OmegaDot, &almMsg.rootA, &almMsg.Omega0,
+                           &almMsg.omega, &almMsg.M0, &almMsg.af0msb, &almMsg.af1msb };
+const int scale[12] = {0, 0, -21, 12,  -19, -38, -11, -23,  -23, -23, -20, -38}; // scale LSB;  shift = scaleLSB - (width - hasSignBit) 
+const int width[12] = {2, 8,  16,  8,   16,  16,  24,  24,   24,  24,  11,  11};
 
-/*
+// See IS-GPS- 200M pg 82, 116
+// all signed except eccentric, toa
+// 32! PRNs, 33 bytes each - 9 ovhd = 24 * 8 bits each
 
-@@Cb
+/*  
+******** Week 147 almanac for PRN-01 ********
+ID:                         01
+Health:                     000
+Eccentricity:               0.1132822037E-001
+Time of Applicability(s):  233472.0000
 
-Subframe 5, pg 1 first
+Orbital Inclination(rad):   0.9865078384      
+Rate of Right Ascen(r/s):  -0.8114623721E-008
+SQRT(A)  (m 1/2):           5153.621094
+Right Ascen at Week(rad):  -0.1660719209E+001
 
-32! PRNs,  33 bytes each - 9 ovhd = 24 * 8 bits each
+Argument of Perigee(rad):   0.882766995
+Mean Anom(rad):             0.3052278345E+001
+Af0(s):                     0.4425048828E-003
+Af1(s/s):                  -0.1091393642E-010
+week:                        147
 
-ids   8
-e    16
-toa   8
-dt   16
-Ohm  16
-svH   8
-sqrA 24
-Ohm0 24
-ohm  24
-M0   24
-af0  11
-af1  11
-t     2
-________
-    192
-
-See IS-GPS-200M pg 82, 179
-
-// parse:
-ID                                01
-Health : 000
-Eccentricity : 0.1132822037E-001
-Time of Applicability(s) : 233472.0000
-Orbital Inclination(rad) : 0.9865078384
-Rate of Right Ascen(r / s) : -0.8114623721E-008
-SQRT(A)  (m 1 / 2) : 5153.621094
-Right Ascen at Week(rad) : -0.1660719209E+001
-Argument of Perigee(rad) : 0.882766995
-Mean Anom(rad) : 0.3052278345E+001
-Af0(s) : 0.4425048828E-003
-Af1(s / s) : -0.1091393642E-010
-week : 147
+******** Week 147 almanac for PRN-02 ********
 */
+
+
+FILE* alm;
+char line[64];
+
+void setField(int field) {
+  fgets(line, sizeof(line), alm);
+
+  double val = atof(line + 28);
+  const double PI = ;
+  switch (field) {  
+    case 4:
+    case 5: 
+    case 7:
+    case 8:
+    case 9:
+      val /= PI; // rads -> semi-circles
+      break;
+  }
+  if (field == 4) val -= 0.3; // subtract 0.3 for deltaI
+  // scale
+  // check fit in width
+  // set field:  Big endian
+  // handle specail case: 11 bits
+
+
+}
+
+void sendAlmanac() {
+  FILE* alm = fopen("current.alm", "rt");
+  for (int prn = 1; prn < 32; ++prn) {
+    almMsg.subframe = prn <= 25 ? 5 : 4;
+    almMsg.page = prn <= 25 ? prn : prn <= 25 + 4 ? prn - 24 : prn <= 25 + 4 + 4 ? prn - 23 : 25;
+
+    fgets(line, sizeof(line), alm);  // skip header line
+
+    for (int i = 0; i < 12; ++i)
+      setField(i);
+   
+    fgets(line, sizeof(line), alm);  // skip week
+    fgets(line, sizeof(line), alm);  // skip blank line
+
+    motoCmd(&almMsg, sizeof(almMsg), &response, 9);
+  }
+  fclose(alm);
+}
 
 
 char almanac[1122];
 
 int main() {
 
-  if (sizeof(almPageMsg) != 26) exit(sizeof(almPageMsg));
+  if (sizeof(almMsg) != 33 - 5) exit(sizeof(almMsg));
 
 #if 1
   if (!openSerial("COM3", 9600)) exit(-1);
@@ -227,17 +265,18 @@ int main() {
   setComm(9600);
 #endif
 
-  motoCmd(NUM_SATS == 6 ? "Ba\000" : "Ea\000", 3); // poll
+  motoCmd(NUM_SATS == 6 ? "Ba\000" : "Ea\000", 3, response, sizeof(response)); // poll mode, flush
 
   motoCmd("Ac\377\377\377\377", 6);  // check date
   int year = response[6] * 256 + response[7];
   if (year != 2022) {
     motoCmd("Cf", 2); // factory defaults;
-    // TODO: load almanac
-  } else {
+    // TODO:
+    // sendAlmanac();
+  } else { // save alamanc
     motoCmd("Be\000", 3, almanac, sizeof(almanac)); // request alamanac data
     if (bytesRead > 1000) {
-      FILE* alm = fopen("almanac.alm", "wb");
+      FILE* alm = fopen("almanac.old.alm", "wb");
       fwrite(almanac, 1, bytesRead, alm);
       fclose(alm);
     }
@@ -276,7 +315,7 @@ int main() {
 
   motoCmd("Ac\377\377\377\377", 6);  // check date
   year = response[6] * 256 + response[7];
-  printf("Date is %X/%X/%d\n", response[4], response[5], year); // wrong *******************8
+  printf("Date is %X/%X/%d\n", response[4], response[5], year);
 
   motoCmd("Cj", 2);
   printf("%s\n", response); // ID
