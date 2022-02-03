@@ -57,7 +57,7 @@ bool motoCmd(const void* cmd, int len, void* pResponse = response, int responseL
   for (int p = 0; p < len; ++p) 
     sum ^= ((char*)cmd)[p]; // XOR of message bytes after @@ and before checksum
 
-  uchar send[16] = "@@";
+  uchar send[256] = "@@";   // longest message 171 bytes
   memcpy(send + 2, cmd, len);
   send[2 + len] = sum;  // checksum
   memcpy(send + 2 + len + 1, "\r\n", 2); // CRLF
@@ -66,6 +66,10 @@ bool motoCmd(const void* cmd, int len, void* pResponse = response, int responseL
   if (responseLen < 0) responseLen = 2 + len + 3;
   bool OK = ReadFile(hCom, pResponse, responseLen, &bytesRead, NULL);
   ((char*)(pResponse))[bytesRead] = 0;
+
+  if (*(char*)pResponse != '@' || *((char*)pResponse + bytesRead -1) != '\n')
+    printf("Bad response to %s\n", cmd);
+
   return OK;
 }
 
@@ -105,27 +109,27 @@ struct {
     // 8 - Avail for Position
     char SNR;
     struct {
-      char used : 1;
-      char momAlert : 1;
-      char spoof : 1;
-      char unhealthy : 1;
-      char inaccurate : 1;
-      char spare2 : 1;
-      char spare1 : 1;
-      char parityErr : 1;
+      uchar used : 1;
+      uchar momAlert : 1;
+      uchar spoof : 1;
+      uchar unhealthy : 1;
+      uchar inaccurate : 1;
+      uchar spare2 : 1;
+      uchar spare1 : 1;
+      uchar parityErr : 1;
     } chStatus;
   } sat[NUM_SATS];
 
   struct {
-    char posProp : 1;
-    char poorGeo : 1;
-    char fix3D : 1;
-    char fix2D : 1;
-    char acquire : 1;
-    char differential : 1;
-    char insuffVisible : 1;
-    char badAlmanac : 1;
-  } recvrStatus;
+    uchar posProp : 1;
+    uchar poorGeo : 1;
+    uchar fix3D : 1;
+    uchar fix2D : 1;
+    uchar acquire : 1;
+    uchar differential : 1;
+    uchar insuffVisible : 1;
+    uchar badAlmanac : 1;
+  } rcvrStatus;
 
   uchar check;
   char CR;
@@ -146,9 +150,9 @@ struct {
 
   // Big endian
   struct {
-    uchar dataID : 2;
+    uchar dataID : 2;   // ?????
     uchar svID   : 6;
-  };
+  } w1msb;
   //                // scale (2^N LSB)
   unsigned short eccentric;  // -21      Eccentricity
 
@@ -172,11 +176,11 @@ struct {
 } almMsg = { {'C', 'b'}, }; // s/b 28 bytes + 5 (@@ ... Chk CR LF) = 33 byte messages
 
 // fields in .alm file order:
-const void* pField[12] = { &almMsg.svID, &almMsg.svHealth, &almMsg.eccentric, &almMsg.toa,  
+const void* pField[12] = { &almMsg.w1msb, &almMsg.svHealth, &almMsg.eccentric, &almMsg.toa,
                            &almMsg.deltaI, &almMsg.OmegaDot, &almMsg.rootA, &almMsg.Omega0,
                            &almMsg.omega, &almMsg.M0, &almMsg.af0msb, &almMsg.af1msb };
 const int scale[12] = {0, 0, -21, 12,  -19, -38, -11, -23,  -23, -23, -20, -38}; // scale LSB;  shift = scaleLSB - (width - hasSignBit) 
-const int width[12] = {2, 8,  16,  8,   16,  16,  24,  24,   24,  24,  11,  11};
+const int width[12] = {6, 8,  16,  8,   16,  16,  24,  24,   24,  24,  11,  11};
 
 // See IS-GPS- 200M pg 82, 116
 // all signed except eccentric, toa
@@ -211,7 +215,7 @@ void setField(int field) {
   fgets(line, sizeof(line), alm);
 
   double val = atof(line + 28);
-  const double PI = ;
+  const double PI = 3.141592653589793238462643383279502884L;
   switch (field) {  
     case 4:
     case 5: 
@@ -250,7 +254,7 @@ void sendAlmanac() {
 }
 
 
-char almanac[1122];
+char almanac[34*33];
 
 int main() {
 
@@ -260,7 +264,6 @@ int main() {
   if (!openSerial("COM3", 9600)) exit(-1);
 #else
   if (!openSerial("COM3", 4800)) exit(-1);
-
   WriteFile(hCom, "$PMOTG,FOR,0*2A", 15, NULL, NULL);
   setComm(9600);
 #endif
@@ -285,7 +288,7 @@ int main() {
   if (1) { // ignored if already fixing position
     // set date / time
     time_t rtime; time(&rtime);
-    struct tm* pTime = gmtime(&rtime);
+    struct tm* pTime = gmtime(&rtime); pTime->tm_year += 1900;
     char cmd[16];
     sprintf(cmd, "Ac%c%c%c%c", pTime->tm_mon + 1, pTime->tm_mday, pTime->tm_year / 256, pTime->tm_year % 256);
     motoCmd(cmd, 6);
@@ -310,15 +313,15 @@ int main() {
 
     posCmd.cmd = 'f';
     posCmd.val = _byteswap_ulong(height);
-    motoCmd(&posCmd, 7);    
+    motoCmd(&posCmd, 7, &response, 15);    
   }
 
   motoCmd("Ac\377\377\377\377", 6);  // check date
   year = response[6] * 256 + response[7];
-  printf("Date is %X/%X/%d\n", response[4], response[5], year);
+  printf("Date: %X/%X/%d\n", response[4], response[5], year);
 
-  motoCmd("Cj", 2);
-  printf("%s\n", response); // ID
+  motoCmd("Cj", 2, &response, sizeof(response));
+  printf("%s\n", response + 4); // ID
 
   motoCmd("Ag\000", 3); // set mask angle to 0 to use full sky
   motoCmd("Cg\001", 3); // position fix mode (for VP units)
@@ -327,6 +330,8 @@ int main() {
      if (motoCmd(NUM_SATS == 6 ? "Ba\000" : "Ea\000", 3, &baMsg, sizeof(baMsg)) && bytesRead == sizeof(baMsg)) { // unsolicited 1/sec  (or slower with longer serial timeout)
       for (int s = 0; s < NUM_SATS; ++s)
         printf("%3d:%X%+3d ", baMsg.sat[s].satID, baMsg.sat[s].trackMode, (char)(baMsg.sat[s].SNR + 127));
+
+      printf("%X", *(uchar*)&baMsg.rcvrStatus);
     } else printf("Read %d", bytesRead);
     printf("\n");
 
