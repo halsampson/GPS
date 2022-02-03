@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <conio.h>
 #include <time.h> 
+#include <math.h>
 
 typedef unsigned char uchar;
 
@@ -67,8 +68,10 @@ bool motoCmd(const void* cmd, int len, void* pResponse = response, int responseL
   bool OK = ReadFile(hCom, pResponse, responseLen, &bytesRead, NULL);
   ((char*)(pResponse))[bytesRead] = 0;
 
-  if (*(char*)pResponse != '@' || *((char*)pResponse + bytesRead -1) != '\n')
+  if (*(char*)pResponse != '@' || *((char*)pResponse + bytesRead - 1) != '\n') {
     printf("Bad response to %s\n", cmd);
+    exit(bytesRead);
+  }
 
   return OK;
 }
@@ -144,13 +147,13 @@ typedef struct {
 } int24;
 
 struct {
-  char cmd[2];    // Cb
+  char cmd[2];     // Cb
   uchar subframe;  // 5: pg 1..25;  4: 2..5, 7..10. 25
   uchar page;
 
   // Big endian
   struct {
-    uchar dataID : 2;   // ?????
+    uchar dataID : 2;   // TODO: see pg. 113
     uchar svID   : 6;
   } w1msb;
   //                // scale (2^N LSB)
@@ -176,11 +179,11 @@ struct {
 } almMsg = { {'C', 'b'}, }; // s/b 28 bytes + 5 (@@ ... Chk CR LF) = 33 byte messages
 
 // fields in .alm file order:
-const void* pField[12] = { &almMsg.w1msb, &almMsg.svHealth, &almMsg.eccentric, &almMsg.toa,
+void* const pField[12] = { &almMsg.w1msb, &almMsg.svHealth, &almMsg.eccentric, &almMsg.toa,
                            &almMsg.deltaI, &almMsg.OmegaDot, &almMsg.rootA, &almMsg.Omega0,
                            &almMsg.omega, &almMsg.M0, &almMsg.af0msb, &almMsg.af1msb };
-const int scale[12] = {0, 0, -21, 12,  -19, -38, -11, -23,  -23, -23, -20, -38}; // scale LSB;  shift = scaleLSB - (width - hasSignBit) 
-const int width[12] = {6, 8,  16,  8,   16,  16,  24,  24,   24,  24,  11,  11};
+const int scale[12] = { 0,  0, -21, 12,  -19, -38, -11, -23,  -23, -23, -20, -38}; // scale LSB
+const int width[12] = { 6,  8,  16,  8,   16,  16,  24,  24,   24,  24,  11,  11};
 
 // See IS-GPS- 200M pg 82, 116
 // all signed except eccentric, toa
@@ -191,11 +194,11 @@ const int width[12] = {6, 8,  16,  8,   16,  16,  24,  24,   24,  24,  11,  11};
 ID:                         01
 Health:                     000
 Eccentricity:               0.1132822037E-001
-Time of Applicability(s):  233472.0000
+Time of Applicability(s):  233472.0000            0..602112 secs    2^20 >> 12
 
 Orbital Inclination(rad):   0.9865078384      
 Rate of Right Ascen(r/s):  -0.8114623721E-008
-SQRT(A)  (m 1/2):           5153.621094
+SQRT(A)  (m 1/2):           5153.621094           2530 to 8192
 Right Ascen at Week(rad):  -0.1660719209E+001
 
 Argument of Perigee(rad):   0.882766995
@@ -214,6 +217,15 @@ char line[64];
 void setField(int field) {
   fgets(line, sizeof(line), alm);
 
+  if (field == 1) {// svHealth
+    almMsg.svHealth = atoi(line + 28); return;
+  }
+
+  switch (width[field]) {
+    case  2: almMsg.w1msb.dataID = atoi(line + 28); return;  // never
+    case  6: almMsg.w1msb.svID = atoi(line + 28);  return;
+  }
+
   double val = atof(line + 28);
   const double PI = 3.141592653589793238462643383279502884L;
   switch (field) {  
@@ -226,16 +238,33 @@ void setField(int field) {
       break;
   }
   if (field == 4) val -= 0.3; // subtract 0.3 for deltaI
-  // scale
-  // check fit in width
-  // set field:  Big endian
-  // handle specail case: 11 bits
 
+  val /= pow(2, scale[field]);  // scale  LSB 
 
+  if (val >= pow(2, width[field]) || val < -pow(2, width[field] - 1))   // check fit in width
+    printf("field %d won't fit\n", field);
+
+  int set = (int)(val + 0.49999999); // often signed
+
+  // set field:  Big endian, beware sign!!!
+  switch (width[field]) {
+  case  8: *(uchar*)pField[field] = (uchar)set; break;
+    case 11:  // split
+      *(uchar*)pField[field] = (uchar)(set >> 3);
+      switch (field) {
+        case 10: almMsg.af0lsb = set & 7; break;
+        case 11: almMsg.af1lsb = set & 7; break;
+      }
+      break;
+
+    case 24: {unsigned long bigeSetl = _byteswap_ulong(set); memcpy(pField[field], (char*)&bigeSetl + 1, 3); } break;
+    case 16: {unsigned short bigeSets = _byteswap_ushort((unsigned short)set); *(unsigned short*)pField[field] = bigeSets; } break;
+  }
 }
 
 void sendAlmanac() {
-  FILE* alm = fopen("current.alm", "rt");
+  alm = fopen("current.alm", "rt");
+  if (!alm) exit(-5);
   for (int prn = 1; prn < 32; ++prn) {
     almMsg.subframe = prn <= 25 ? 5 : 4;
     almMsg.page = prn <= 25 ? prn : prn <= 25 + 4 ? prn - 24 : prn <= 25 + 4 + 4 ? prn - 23 : 25;
@@ -248,7 +277,7 @@ void sendAlmanac() {
     fgets(line, sizeof(line), alm);  // skip week
     fgets(line, sizeof(line), alm);  // skip blank line
 
-    motoCmd(&almMsg, sizeof(almMsg), &response, 9);
+    motoCmd(&almMsg, sizeof(almMsg), &response, 9); 
   }
   fclose(alm);
 }
@@ -270,19 +299,14 @@ int main() {
 
   motoCmd(NUM_SATS == 6 ? "Ba\000" : "Ea\000", 3, response, sizeof(response)); // poll mode, flush
 
-  motoCmd("Ac\377\377\377\377", 6);  // check date
-  int year = response[6] * 256 + response[7];
-  if (year != 2022) {
+  motoCmd("Be\000", 3, almanac, sizeof(almanac)); // request almanac data
+  if (bytesRead < 66) {
     motoCmd("Cf", 2); // factory defaults;
-    // TODO:
-    // sendAlmanac();
+    sendAlmanac();
   } else { // save alamanc
-    motoCmd("Be\000", 3, almanac, sizeof(almanac)); // request alamanac data
-    if (bytesRead > 1000) {
-      FILE* alm = fopen("almanac.old.alm", "wb");
-      fwrite(almanac, 1, bytesRead, alm);
-      fclose(alm);
-    }
+    FILE* alm = fopen("almanac.old.alm", "wb");
+    fwrite(almanac, 1, bytesRead, alm);
+    fclose(alm);
   }
 
   if (1) { // ignored if already fixing position
@@ -317,14 +341,15 @@ int main() {
   }
 
   motoCmd("Ac\377\377\377\377", 6);  // check date
-  year = response[6] * 256 + response[7];
+  int year = response[6] * 256 + response[7];
   printf("Date: %X/%X/%d\n", response[4], response[5], year);
 
   motoCmd("Cj", 2, &response, sizeof(response));
   printf("%s\n", response + 4); // ID
 
   motoCmd("Ag\000", 3); // set mask angle to 0 to use full sky
-  motoCmd("Cg\001", 3); // position fix mode (for VP units)
+
+  motoCmd("Cg\001", 3); // position fix mode (for VP units)   // no response after almanac load?   TODO
     
   while (!_kbhit()) {
      if (motoCmd(NUM_SATS == 6 ? "Ba\000" : "Ea\000", 3, &baMsg, sizeof(baMsg)) && bytesRead == sizeof(baMsg)) { // unsolicited 1/sec  (or slower with longer serial timeout)
@@ -335,7 +360,7 @@ int main() {
     } else printf("Read %d", bytesRead);
     printf("\n");
 
-    Sleep(60000);  // or more
+    Sleep(5000);  // or more
   }
   CloseHandle(hCom);
 }
