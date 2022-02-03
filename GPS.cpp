@@ -6,6 +6,8 @@
 #include <time.h> 
 #include <math.h>
 
+// TODO: Bad responses; sniff WinCore
+
 typedef unsigned char uchar;
 
 HANDLE hCom = NULL;
@@ -35,9 +37,9 @@ HANDLE openSerial(const char* portName, int baudRate = 4800) {
 
   // USB bulk packets arrive at 1 kHz rate
   COMMTIMEOUTS timeouts = { 0 };  // in ms
-  timeouts.ReadIntervalTimeout = 1000; // between charaters
+  timeouts.ReadIntervalTimeout = 2000; // between charaters
   timeouts.ReadTotalTimeoutMultiplier = 20; // * num requested chars
-  timeouts.ReadTotalTimeoutConstant = 1000; // + this = total timeout
+  timeouts.ReadTotalTimeoutConstant = 2000; // + this = total timeout
   if (!SetCommTimeouts(hCom, &timeouts))  printf("Can't SetCommTimeouts\n");
 
   return hCom;
@@ -68,8 +70,8 @@ bool motoCmd(const void* cmd, int len, void* pResponse = response, int responseL
   bool OK = ReadFile(hCom, pResponse, responseLen, &bytesRead, NULL);
   ((char*)(pResponse))[bytesRead] = 0;
 
-  if (*(char*)pResponse != '@' || *((char*)pResponse + bytesRead - 1) != '\n') {
-    printf("Bad response to %s\n", cmd);
+  if (*(char*)pResponse != '@' || *((char*)pResponse + bytesRead - 1) != '\n') {  // TODO: more checks
+    printf("%s -> %s\n", cmd, (char*)pResponse);
     exit(bytesRead);
   }
 
@@ -241,14 +243,16 @@ void setField(int field) {
 
   val /= pow(2, scale[field]);  // scale  LSB 
 
-  if (val >= pow(2, width[field]) || val < -pow(2, width[field] - 1))   // check fit in width
-    printf("field %d won't fit\n", field);
+  if (val >= pow(2, width[field]) || val < -pow(2, width[field] - 1)) {  // check fit in width
+    printf("field %d of svID %d won't fit\n", field, almMsg.w1msb.svID);
+    exit(-6);
+  }
 
-  int set = (int)(val + 0.49999999); // often signed
+  int set = (int)(val + 0.49999999); // most signed
 
-  // set field:  Big endian, beware sign!!!
+  // set field:  Big endian, beware sign!!
   switch (width[field]) {
-  case  8: *(uchar*)pField[field] = (uchar)set; break;
+    case  8: *(uchar*)pField[field] = (uchar)set; break;
     case 11:  // split
       *(uchar*)pField[field] = (uchar)(set >> 3);
       switch (field) {
@@ -257,15 +261,17 @@ void setField(int field) {
       }
       break;
 
-    case 24: {unsigned long bigeSetl = _byteswap_ulong(set); memcpy(pField[field], (char*)&bigeSetl + 1, 3); } break;
-    case 16: {unsigned short bigeSets = _byteswap_ushort((unsigned short)set); *(unsigned short*)pField[field] = bigeSets; } break;
+     case 16: {unsigned short bigEnd = _byteswap_ushort((unsigned short)set); *(unsigned short*)pField[field] = bigEnd; } break;
+     case 24: {unsigned long  bigEnd = _byteswap_ulong((unsigned long)set); memcpy(pField[field], (char*)&bigEnd + 1, 3); } break;
+     default: printf("Width %d!\n", width[field]); break;
   }
 }
 
 void sendAlmanac() {
   alm = fopen("current.alm", "rt");
   if (!alm) exit(-5);
-  for (int prn = 1; prn < 32; ++prn) {
+  almMsg.w1msb.dataID = 1;   // TODO: see pg. 113
+  for (int prn = 1; prn <= 32; ++prn) {
     almMsg.subframe = prn <= 25 ? 5 : 4;
     almMsg.page = prn <= 25 ? prn : prn <= 25 + 4 ? prn - 24 : prn <= 25 + 4 + 4 ? prn - 23 : 25;
 
@@ -297,11 +303,14 @@ int main() {
   setComm(9600);
 #endif
 
+  ReadFile(hCom, response, sizeof(response), &bytesRead, NULL);  // flush
+
   motoCmd(NUM_SATS == 6 ? "Ba\000" : "Ea\000", 3, response, sizeof(response)); // poll mode, flush
 
   motoCmd("Be\000", 3, almanac, sizeof(almanac)); // request almanac data
-  if (bytesRead < 66) {
-    motoCmd("Cf", 2); // factory defaults;
+  bool hasAlmanac = bytesRead > 66;
+  if (!hasAlmanac) {
+    motoCmd("Cf", 2); // factory defaults
     sendAlmanac();
   } else { // save alamanc
     FILE* alm = fopen("almanac.old.alm", "wb");
@@ -349,7 +358,7 @@ int main() {
 
   motoCmd("Ag\000", 3); // set mask angle to 0 to use full sky
 
-  motoCmd("Cg\001", 3); // position fix mode (for VP units)   // no response after almanac load?   TODO
+  motoCmd("Cg\001", 3); // position fix mode (for VP units)   // slow response after almanac load?   TODO
     
   while (!_kbhit()) {
      if (motoCmd(NUM_SATS == 6 ? "Ba\000" : "Ea\000", 3, &baMsg, sizeof(baMsg)) && bytesRead == sizeof(baMsg)) { // unsolicited 1/sec  (or slower with longer serial timeout)
