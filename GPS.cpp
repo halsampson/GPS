@@ -6,14 +6,14 @@
 #include <time.h> 
 #include <math.h>
 
-// TODO: Bad responses; sniff WinCore
+// TODO: ? SVHealth in pg 25s ??
 
 typedef unsigned char uchar;
 
 HANDLE hCom = NULL;
 DCB dcb;
 
-void setResponseMs(int ms) {
+void setResponseMs(DWORD ms) {
   COMMTIMEOUTS timeouts = { 0 };  // in ms
   timeouts.ReadIntervalTimeout = 100; // between charaters
   timeouts.ReadTotalTimeoutMultiplier = 20; // * num requested chars
@@ -56,30 +56,40 @@ DWORD bytesRead;
 uchar response[304];  // longest is Cj 294
 
 bool motoCmd(const void* cmd, int len, void* pResponse = response, int responseLen = -1) {
-  if (cmd) {
-    uchar sum = 0;
-    for (int p = 0; p < len; ++p)
-      sum ^= ((char*)cmd)[p]; // XOR of message bytes after @@ and before checksum
+  while (1) {
+    if (cmd) {
+      uchar sum = 0;
+      for (int p = 0; p < len; ++p)
+        sum ^= ((char*)cmd)[p]; // XOR of message bytes after @@ and before checksum
 
-    uchar send[256] = "@@";   // longest message 171 bytes
-    memcpy(send + 2, cmd, len);
-    send[2 + len] = sum;  // checksum
-    memcpy(send + 2 + len + 1, "\r\n", 2); // CRLF
+      uchar send[256] = "@@";   // longest message 171 bytes
+      memcpy(send + 2, cmd, len);
+      send[2 + len] = sum;  // checksum
+      memcpy(send + 2 + len + 1, "\r\n", 2); // CRLF
 
-    WriteFile(hCom, send, 2 + len + 3, NULL, NULL);
-  }
+      WriteFile(hCom, send, 2 + len + 3, NULL, NULL);
+    }
 
-  if (responseLen < 0) responseLen = 2 + len + 3;
-  bool OK = ReadFile(hCom, pResponse, responseLen, &bytesRead, NULL);
-  ((char*)(pResponse))[bytesRead] = 0;
+    if (responseLen < 0) responseLen = 2 + len + 3;
+    bool OK = ReadFile(hCom, pResponse, responseLen, &bytesRead, NULL);
+    ((char*)(pResponse))[bytesRead] = 0;
 
-  if (*(char*)pResponse != '@' 
-  || ((char*)pResponse)[bytesRead - 1] != '\n') {  // TODO: more checks
-    printf("%s -> %s\n", (char*)cmd, (char*)pResponse);
-    exit(bytesRead);
-  }
 
-  return OK;
+    if (((char*)pResponse)[2] == 'Q') {  // QX after power cycle
+      printf("Q");
+      char restOfQ[128]; 
+      ReadFile(hCom, restOfQ, sizeof(restOfQ), &bytesRead, NULL);  // flush, wait
+      Sleep(5000);
+      continue;
+    }
+
+    if (*(char*)pResponse == '@'
+    && ((char*)pResponse)[bytesRead - 1] == '\n') 
+      return true;
+
+    printf("%s -> %s\n", (char*)cmd, (char*)pResponse); 
+    Sleep(1000);
+  } 
 }
 
 
@@ -153,7 +163,7 @@ typedef struct {
 } int24;
 
 
-// TODO: check byte order within words?
+// TODO: check byte order of words, within words (Moto vs. sent)
 // left on charts = LSB????
 
 struct {
@@ -278,6 +288,19 @@ void setField(int field, char* line) {
 
 char BdResponse[23];
 
+void setSubframeAndPage(void) {
+  int id = almMsg.w3msb.svID;
+  printf("\r%2d", id);
+  almMsg.subframe = id < 25 ? 5 : 4;  // 24 in subframe 5, 8 in subframe 4  pgs 2..5  7..10
+  int page = id;
+  if (page >= 25) {
+    page += 2 - 25;
+    if (page >= 6)  // page 6 skipped
+      ++page;
+  }
+  almMsg.page = page;
+}
+
 void sendAlmanac() {
   printf("   almanac");
   FILE* alm = fopen("current.alm", "rb");
@@ -287,7 +310,7 @@ void sendAlmanac() {
   for (int sat = 1; sat <= 32; ++sat) {
     char line[128];
     if (fgets(line, sizeof(line), alm)) {  // skip header line - exit on end of file
-      week = atoi(line + 15);
+      week = atoi(line + 13);
     
       for (int i = 0; i < 12; ++i) {
         if (!fgets(line, sizeof(line), alm)) {
@@ -301,35 +324,29 @@ void sendAlmanac() {
       fgets(line, sizeof(line), alm);  // skip blank line
     } 
 
-    // svID 28 currently missing
-
-    int id = almMsg.w3msb.svID;
-    if (!id) break;
-    almMsg.subframe = id < 25 ? 5 : 4;  // 24 in subframe 5, 8 in subframe 4  pgs 2..5  7..10
-    int page = id;
-    if (page >= 25) {
-      page += 2 - 25;
-      if (page >= 6)  // page 6 skipped
-        ++page;
-    } 
-    almMsg.page = page;
+    setSubframeAndPage();
     motoCmd(&almMsg, sizeof(almMsg), &response, 9);
-
-    printf("\r%2d", id);
   }
 
+  // svID 28 currently missing
+  almMsg.w3msb.svID = 28;
+  setSubframeAndPage();
+  motoCmd(&almMsg, sizeof(almMsg), &response, 9);
+
+  // TODO: health from svHealth ( 0 = OK )
+  // svConfig codes 0 = no info
   uchar toa = almMsg.toa;
   almMsg.page = 25;
   almMsg.subframe = 4; // p 87
-  memset(&almMsg.eccentric, 0, sizeof(almMsg) - 5); // 0 = healthy?  - TODO: from svHealth   union
+  memset(&almMsg.eccentric, 0, sizeof(almMsg) - 5); 
   motoCmd(&almMsg, sizeof(almMsg), &response, 9);
 
   almMsg.subframe = 5; // p 83
-  almMsg.page25.toa = toa;
+  almMsg.page25.toa = toa; // ?? scale ??, offset TODO
   almMsg.page25.week = week & 0xFF; 
   motoCmd(&almMsg, sizeof(almMsg), &response, 9);
 
-  // see also p 117, 120, 226; ? Parity doesn't fit!!
+  // see also p 117, 120, 226
 
   fclose(alm);
 
@@ -351,11 +368,15 @@ int main() {
   setComm(9600);
 #endif
 
-  WriteFile(hCom, NULL, 1, NULL, NULL);  // or break?? -- scope WinOncore
-  setResponseMs(100);
+  setResponseMs(1000);
   ReadFile(hCom, response, sizeof(response), &bytesRead, NULL);  // flush
 
-  setResponseMs(16000);
+  motoCmd("Cg\000", 3); // Position fix mode off
+
+  setResponseMs(20000);  // ??
+
+  motoCmd("Cj", 2, &response, 294);
+  printf("%s\n", response + 4); // ID
 
   motoCmd(NUM_SATS == 6 ? "Ba\000" : "Ea\000", 3, response, NUM_SATS == 6 ? 68 : 76); // poll mode
 
@@ -369,10 +390,12 @@ int main() {
   } else {
     // motoCmd("Cf", 2); // factory defaults    returns Cg0 -- why?
     sendAlmanac();
-    Sleep(2000);  // process almanac
+    Sleep(5000);  // process almanac
     motoCmd("Bd\000", 3, almStatus, sizeof(almStatus));
     printf("Almanac %s\n", almStatus[4] ? "OK" : "bad!");
-  } 
+  }
+
+  ReadFile(hCom, response, sizeof(response), &bytesRead, NULL);  // flush
 
   if (1) { // ignored if already fixing position
     // set date / time
@@ -408,9 +431,6 @@ int main() {
   motoCmd("Ac\377\377\377\377", 6);  // check date
   int year = response[6] * 256 + response[7];
   printf("Date: %X/%X/%d\n", response[4], response[5], year);
-
-  motoCmd("Cj", 2, &response, sizeof(response));
-  printf("%s\n", response + 4); // ID
 
   motoCmd("Ag\000", 3); // set mask angle to 0 to use full sky
 
