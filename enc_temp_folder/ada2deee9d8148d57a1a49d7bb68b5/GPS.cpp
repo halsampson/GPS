@@ -267,7 +267,6 @@ void setField(int field, char* line) {
 }
 
 void sendAlmanac() {
-  printf("Sending almanac ");
   FILE* alm = fopen("current.alm", "rb");
   if (!alm) exit(-5);
   almMsg.w1msb.dataID = 1;   // TODO: see pg. 113
@@ -290,10 +289,8 @@ void sendAlmanac() {
     fgets(line, sizeof(line), alm);  // skip blank line
 
     motoCmd(&almMsg, sizeof(almMsg), &response, 9); 
-    printf(".");
   }
   fclose(alm);
-  printf("\n");
 }
 
 
