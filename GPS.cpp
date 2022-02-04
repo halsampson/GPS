@@ -56,18 +56,18 @@ DWORD bytesRead;
 uchar response[304];  // longest is Cj 294
 
 bool motoCmd(const void* cmd, int len, void* pResponse = response, int responseLen = -1) {
-  uchar sum = 0;
-  for (int p = 0; p < len; ++p) 
-    sum ^= ((char*)cmd)[p]; // XOR of message bytes after @@ and before checksum
+  if (cmd) {
+    uchar sum = 0;
+    for (int p = 0; p < len; ++p)
+      sum ^= ((char*)cmd)[p]; // XOR of message bytes after @@ and before checksum
 
-  uchar send[256] = "@@";   // longest message 171 bytes
-  memcpy(send + 2, cmd, len);
-  send[2 + len] = sum;  // checksum
-  memcpy(send + 2 + len + 1, "\r\n", 2); // CRLF
+    uchar send[256] = "@@";   // longest message 171 bytes
+    memcpy(send + 2, cmd, len);
+    send[2 + len] = sum;  // checksum
+    memcpy(send + 2 + len + 1, "\r\n", 2); // CRLF
 
-  WriteFile(hCom, send, 2 + len + 3, NULL, NULL);
-
-  //if (!memcmp(cmd, "Cg", 2)) Sleep(2000);  // slow response
+    WriteFile(hCom, send, 2 + len + 3, NULL, NULL);
+  }
 
   if (responseLen < 0) responseLen = 2 + len + 3;
   bool OK = ReadFile(hCom, pResponse, responseLen, &bytesRead, NULL);
@@ -152,19 +152,29 @@ typedef struct {
   char b[3];
 } int24;
 
+
+// TODO: check byte order within words?
+// left on charts = LSB????
+
 struct {
   char cmd[2];     // Cb
   uchar subframe;  // 5: pg 1..25;  4: 2..5, 7..10. 25
   uchar page;
 
   // Big endian
+
   struct {
     uchar dataID : 2;   // TODO: see pg. 113
-    uchar svID   : 6;
-  } w1msb;
-  //                // scale (2^N LSB)
-  unsigned short eccentric;  // -21      Eccentricity
-
+    uchar svID : 6;
+  } w3msb;
+  union {
+    unsigned short eccentric;  // -21      Eccentricity
+    struct {
+      uchar toa;
+      uchar week;
+    } page25;
+  };
+                    // scale (2^N LSB)
   uchar toa;        //  12      Time of Applicability (seconds)
   short deltaI;     // -19      - i0 = 0.3 semi-circles; Inclination Angle at Reference Time
 
@@ -185,7 +195,7 @@ struct {
 } almMsg = { {'C', 'b'}, }; // s/b 28 bytes + 5 (@@ ... Chk CR LF) = 33 byte messages
 
 // fields in .alm file order:
-void* const pField[12] = { &almMsg.w1msb, &almMsg.svHealth, &almMsg.eccentric, &almMsg.toa,
+void* const pField[12] = { &almMsg.w3msb, &almMsg.svHealth, &almMsg.eccentric, &almMsg.toa,
                            &almMsg.deltaI, &almMsg.OmegaDot, &almMsg.rootA, &almMsg.Omega0,
                            &almMsg.omega, &almMsg.M0, &almMsg.af0msb, &almMsg.af1msb };
 const int scale[12] = { 0,  0, -21, 12,  -19, -38, -11, -23,  -23, -23, -20, -38}; // scale LSB
@@ -223,8 +233,8 @@ void setField(int field, char* line) {
   }
 
   switch (width[field]) {
-    case  2: almMsg.w1msb.dataID = atoi(line + 28); return;  // never
-    case  6: almMsg.w1msb.svID = atoi(line + 28);  return;
+    case  2: almMsg.w3msb.dataID = atoi(line + 28); return;  // never
+    case  6: almMsg.w3msb.svID = atoi(line + 28);  return;
   }
 
   double val = atof(line + 28);
@@ -243,7 +253,7 @@ void setField(int field, char* line) {
   val /= pow(2, scale[field]);  // scale  LSB 
 
   if (val >= pow(2, width[field]) || val < -pow(2, width[field] - 1)) {  // check fit in width
-    printf("In %s field %d of svID %d: %.0f won't fit\n", line, field, almMsg.w1msb.svID, val);
+    printf("In %s field %d of svID %d: %.0f won't fit\n", line, field, almMsg.w3msb.svID, val);
     exit(-6);
   }
 
@@ -266,33 +276,63 @@ void setField(int field, char* line) {
   }
 }
 
+char BdResponse[23];
+
 void sendAlmanac() {
-  printf("Sending almanac ");
+  printf("   almanac");
   FILE* alm = fopen("current.alm", "rb");
   if (!alm) exit(-5);
-  almMsg.w1msb.dataID = 1;   // TODO: see pg. 113
-  for (int prn = 1; prn <= 32; ++prn) {
+  almMsg.w3msb.dataID = 1;   // TODO: see pg. 113
+  int week;
+  for (int sat = 1; sat <= 32; ++sat) {
     char line[128];
-    almMsg.subframe = prn <= 25 ? 5 : 4;
-    almMsg.page = prn <= 25 ? prn : prn <= 25 + 4 ? prn - 24 : prn <= 25 + 4 + 4 ? prn - 23 : 25;
-
-    if (!fgets(line, sizeof(line), alm)) break;  // skip header line - exit on end of file
-
-    for (int i = 0; i < 12; ++i) {
-      if (!fgets(line, sizeof(line), alm)) {
-        printf("%s", line);
-        exit(-7);
+    if (fgets(line, sizeof(line), alm)) {  // skip header line - exit on end of file
+      week = atoi(line + 15);
+    
+      for (int i = 0; i < 12; ++i) {
+        if (!fgets(line, sizeof(line), alm)) {
+          printf("%s", line);
+          exit(-7);
+        }
+        setField(i, line);
       }
-      setField(i, line);
-    }
-   
-    fgets(line, sizeof(line), alm);  // skip week
-    fgets(line, sizeof(line), alm);  // skip blank line
 
-    motoCmd(&almMsg, sizeof(almMsg), &response, 9); 
-    printf(".");
+      fgets(line, sizeof(line), alm);  // skip week
+      fgets(line, sizeof(line), alm);  // skip blank line
+    } 
+
+    // svID 28 currently missing
+
+    int id = almMsg.w3msb.svID;
+    if (!id) break;
+    almMsg.subframe = id < 25 ? 5 : 4;  // 24 in subframe 5, 8 in subframe 4  pgs 2..5  7..10
+    int page = id;
+    if (page >= 25) {
+      page += 2 - 25;
+      if (page >= 6)  // page 6 skipped
+        ++page;
+    } 
+    almMsg.page = page;
+    motoCmd(&almMsg, sizeof(almMsg), &response, 9);
+
+    printf("\r%2d", id);
   }
+
+  uchar toa = almMsg.toa;
+  almMsg.page = 25;
+  almMsg.subframe = 4; // p 87
+  memset(&almMsg.eccentric, 0, sizeof(almMsg) - 5); // 0 = healthy?  - TODO: from svHealth   union
+  motoCmd(&almMsg, sizeof(almMsg), &response, 9);
+
+  almMsg.subframe = 5; // p 83
+  almMsg.page25.toa = toa;
+  almMsg.page25.week = week & 0xFF; 
+  motoCmd(&almMsg, sizeof(almMsg), &response, 9);
+
+  // see also p 117, 120, 226; ? Parity doesn't fit!!
+
   fclose(alm);
+
   printf("\n");
 }
 
@@ -315,21 +355,24 @@ int main() {
   setResponseMs(100);
   ReadFile(hCom, response, sizeof(response), &bytesRead, NULL);  // flush
 
-  setResponseMs(10000);
+  setResponseMs(16000);
 
   motoCmd(NUM_SATS == 6 ? "Ba\000" : "Ea\000", 3, response, NUM_SATS == 6 ? 68 : 76); // poll mode
 
-  motoCmd("Be\000", 3, almanac, sizeof(almanac)); // request almanac data
-  bool hasAlmanac = bytesRead > 66;
-  if (!hasAlmanac) {
-    // motoCmd("Cf", 2); // factory defaults
-    sendAlmanac();
-  } else { // save alamanc
+  char almStatus[23];
+  motoCmd("Bd\000", 3, almStatus, sizeof(almStatus));
+  if (almStatus[4]) { // save alamanc
+    motoCmd("Be\000", 3, almanac, sizeof(almanac)); // request almanac data
     FILE* alm = fopen("almanac.old.alm", "wb");
     fwrite(almanac, 1, bytesRead, alm);
     fclose(alm);
-  }
-  Sleep(2000);  // process almanac
+  } else {
+    // motoCmd("Cf", 2); // factory defaults    returns Cg0 -- why?
+    sendAlmanac();
+    Sleep(2000);  // process almanac
+    motoCmd("Bd\000", 3, almStatus, sizeof(almStatus));
+    printf("Almanac %s\n", almStatus[4] ? "OK" : "bad!");
+  } 
 
   if (1) { // ignored if already fixing position
     // set date / time
@@ -344,7 +387,7 @@ int main() {
 
     // set approx position
     const int latitude = (int)(37.3392573 * 3600000);  // in milli arc seconds, Big endian
-    const int longitude = (int)(- 122.0496515 * 3600000);
+    const int longitude = (int)(-122.0496515 * 3600000);
     const int height = 80 * 100;  // in cm
 
     struct {    
@@ -359,7 +402,7 @@ int main() {
 
     posCmd.cmd = 'f';
     posCmd.val = _byteswap_ulong(height);
-    motoCmd(&posCmd, 7, &response, 15);    
+    motoCmd(&posCmd, 7, &response, 15);    // slow reponse
   }
 
   motoCmd("Ac\377\377\377\377", 6);  // check date
@@ -372,18 +415,22 @@ int main() {
   motoCmd("Ag\000", 3); // set mask angle to 0 to use full sky
 
   motoCmd("Cg\001", 3); // position fix mode (for VP units)   // slow response after almanac load?   TODO
-    
-  while (!_kbhit()) {
-     if (motoCmd(NUM_SATS == 6 ? "Ba\000" : "Ea\000", 3, &baMsg, sizeof(baMsg)) && bytesRead == sizeof(baMsg)) { // unsolicited 1/sec  (or slower with longer serial timeout)
-      for (int s = 0; s < NUM_SATS; ++s)
-        printf("%3d:%X%+3d ", baMsg.sat[s].satID, baMsg.sat[s].trackMode, (char)(baMsg.sat[s].SNR + 127));
+  
+  do {
+    while (!_kbhit()) {
+      if (motoCmd(NUM_SATS == 6 ? "Ba\000" : "Ea\000", 3, &baMsg, sizeof(baMsg)) && bytesRead == sizeof(baMsg)) { // unsolicited 1/sec  (or slower with longer serial timeout)
+        for (int s = 0; s < NUM_SATS; ++s)
+          printf("%3d:%X%+3d ", baMsg.sat[s].satID, baMsg.sat[s].trackMode, (char)(baMsg.sat[s].SNR + 127));
 
-      printf("%X", *(uchar*)&baMsg.rcvrStatus);
-    } else printf("Read %d", bytesRead);
-    printf("\n");
+        printf("%X", *(uchar*)&baMsg.rcvrStatus);
+      }
+      else printf("Read %d", bytesRead);
+      printf("\n");
 
-    Sleep(5000);  // or more
-  }
+      Sleep(5000);  // or more
+    }
+  } while (_getch() != 27);  // Escape
+
   CloseHandle(hCom);
 }
 
