@@ -52,7 +52,7 @@ HANDLE openSerial(const char* portName, int baudRate = 4800) {
   return hCom;
 }
 
-void setComm(int baudRate, bool dtrtsEnable = false) {
+void setComm(int baudRate, bool dtrtsEnable = true) {
   dcb.BaudRate = baudRate;
   dcb.fDtrControl = dtrtsEnable ? DTR_CONTROL_ENABLE : DTR_CONTROL_DISABLE;
   dcb.fRtsControl =  dtrtsEnable ? RTS_CONTROL_ENABLE : RTS_CONTROL_DISABLE;
@@ -471,8 +471,19 @@ int main() {
 
 #else //  GPS-500  Sirf III
 
+
+void nmeaCmd(const char* cmd) { // w/o $ and *
+  int chksum = 0;
+  const char* p = cmd;
+  while (*p) chksum ^= *p++;
+
+  char send[256];
+  int len = sprintf(send, "$%s*%02X\r\n", cmd, chksum);
+  WriteFile(hCom, send, len, NULL, NULL);
+}
+
 int main() {
-  openSerial("COM28", 4800);
+  openSerial("COM4", 4800);
 
   while (!_kbhit()) {
     char line[512];
@@ -485,19 +496,49 @@ int main() {
   }
   _getch();
 
+  // disable messages
+  nmeaCmd("PSRF103,00,00,00,01");   
+  nmeaCmd("PSRF103,01,00,00,01");
+  nmeaCmd("PSRF103,02,00,00,01");
+  nmeaCmd("PSRF103,03,00,00,01");
+  nmeaCmd("PSRF103,04,00,00,01");
+  nmeaCmd("PSRF103,05,00,00,01");
+  // nmeaCmd("PSRF103,06,00,00,01");
+  // nmeaCmd("PSRF103,08,00,00,01");
+
+  while (!_kbhit()) {
+    char line[512];
+    DWORD bytesRead;
+    ReadFile(hCom, line, sizeof(line), &bytesRead, NULL);
+    if (bytesRead) {
+      line[bytesRead] = 0;
+      printf("%s\n", line);
+    }
+  }
+  _getch();
+
+#if 1
+  nmeaCmd("PSRF100,0,4800,8,1,0");
+#elif 0
+  WriteFile(hCom, "$PSRF100,0,4800,8,1,0*0F\r\n", 26, NULL, NULL);  // switch from NMEA to Sirf binary; send on split pin 1a
+#elif 1
   WriteFile(hCom, "$PSRF100,0,9600,8,1,0*0C\r\n", 27, NULL, NULL);  // switch from NMEA to Sirf binary; send on split pin 1a
 
-  // Pharos USB has TxD on pin 1a; 5V power; Prolific PL-2303HX
+  Sleep(200);
+
+  // Pharos USB has TxD on pin 1a; 5V power
   // What differs from FTDI which switches mode OK?
+    // Prolific PL-2303HX baud rate switch reset??
     // pin 1b, 4 grounded vs. open -> no change
     // 5V vs. 3.3V -> no change
-    // pin 6 not connected
+    // pin 6 not connected - OK
  
-  setComm(9600, true); 
+  setComm(9600); 
+#endif
 
   // Sirf binary messages start with A0 A2, end with B0 B3
 
-  FILE* sirf = fopen("sirf.bin", "wb");
+  FILE* sirf = fopen("sirf.test.bin", "wb");
 
   while (!_kbhit()) {
     unsigned char line[2048];
@@ -510,7 +551,7 @@ int main() {
 
     fwrite(line, 1, bytesRead, sirf);
   }
-  flcose(sirf);
+  fclose(sirf);
   CloseHandle(hCom);
 }
 /*
