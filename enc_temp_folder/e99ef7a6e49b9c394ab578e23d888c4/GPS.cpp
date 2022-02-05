@@ -469,9 +469,12 @@ int main() {
 
 #else //  GPS-500  Sirf III
 
+// Sirf binary messages start with A0 A2, end with B0 B3
+
 int main() {
   openSerial("COM4", 4800);
 
+#if 1
   while (!_kbhit()) {
     char line[1024];
     DWORD bytesRead;
@@ -482,6 +485,9 @@ int main() {
     }
   }
   _getch();
+#endif
+
+  // ?? baud rate, format??
 
   setComm(4800, true);  // Pin 1a low
 
@@ -496,43 +502,5 @@ int main() {
   }
   CloseHandle(hCom);
 }
-
-// Sirf binary messages start with A0 A2, end with B0 B3
-
-/* Split pin 1a low: Telescope format ??
-B2 EE 72 6B 9A 63
-B2 EE 72 3B 9A 63
-A4 F2 77 39 8D 93 AC
-E4 79 8D 63 A4 D9 EB
-E4 36 8D 63 A4 D6 6B BE 8C 63 B9 D9 C3 69 8D A3 A4 D9 EB
-93 AE D2 CB 69 36 FD
-4C 73 A4 D6 69 36 FD
-4C 73 A4 D6 69 36 FD
-AC 73 A4 D6 69 1B FD
-93 AE D2 6B 39 8D C3 8D D2 6B 3E 5E 8C 63 AC DA 69 36 FD
-B2 EE 72 6B 9A 63
-93 AE D2 6B 9A 63
-93 AE D2 6B 39 1E FD
-93 AE D2 6B 9A 63
-E4 36 8D 63 A4 D6 6B B7 8C 63 B9 D9 63 1A 8D A3 A4 D9 EB
-26 73 A4 D6 69 36 FD
-9C 73 A4 D6 69 36 FD
-93 AE D2 6B 9A 63
-34 9B 8D 63 A4 D9 EB
-B2 D7 72 6B 1A 8D C3 8D D2 6B 3E 5E 8C 63 AC DA 69 36 FD
-34 33 8D 63 A4 D9 EB
-9C 73 A4 D6 69 36 FD
-B2 AE D2 6B 9A 63
-32 AE E4 76 39 36 FD
-B2 D7 D2 6B 1A 8D C3 8D D2 6B 3E 5E 8C 63 AC DA 69 36 FD
-E4 D9 8D 63 A4 D9 EB
-B2 AE D2 6B 39 1E FD
-9C 73 23 AC D2 36 FD
-B2 AE D2 6B 9A 63
-B2 D7 D2 6B 39 8D C3 8D D2 6B 3E 5E 8C 63 AC DA 69 36 FD
-93 AE D2 6B 39 1E FD
-93 AE E4 76 39 36 FD
-93 AE E4 76 39 36 FD
-*/
 
 #endif
