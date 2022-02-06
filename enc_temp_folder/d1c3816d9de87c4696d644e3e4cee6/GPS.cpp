@@ -367,13 +367,13 @@ void sendAlmanac() {
 }
 
 
-uchar cmd_En[] = { 'E', 'n', 0, 1, 0, 10, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // PPS on when lock first satellite
+uchar cmd_En[] = { 'E', 'n', 0, 1, 0, 10, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // Time Raim: PPS on when have first sat
 
 struct {   // otaapnnnmdyyhmspysreen sffffsffffsffffsffffsffffsffffsffffsffff
-  char cmd[4];  // @@En
+  char cmd[4];     // @@En
   char rate;
   char RAIM_on;
-  unsigned short alarm;  // Big endian !!
+  unsigned short alarm;
   char PPS;
   char PPSrate[3]; // ???
   char nextFire[7];
@@ -386,11 +386,12 @@ struct {   // otaapnnnmdyyhmspysreen sffffsffffsffffsffffsffffsffffsffffsffff
 
   struct {
     char svID;
-    int ns;  // Big endian !!
+    int ns;
   } satTime[NUM_CHANNELS];
   char chksum;
   char CRLF[2];
 } En_status;
+
 
 uchar almanac[34*33];
 
