@@ -11,6 +11,7 @@
 
 // TODO: check bit, byte order of @@Cb data
 // TODO: svHealth data to pg 25s
+// TODO: t filed parity
 
 typedef unsigned char uchar;
 
@@ -210,10 +211,9 @@ struct {
   uchar page;
 
   // Big endian
-
   struct {
-    uchar dataID : 2;   // TODO: see pg. 113
     uchar svID : 6;
+    uchar dataID : 2;   // TODO: see pg. 113
   } w3msb;
   union {
     unsigned short eccentric;  // -21      Eccentricity
@@ -227,18 +227,20 @@ struct {
   short deltaI;     // -19      - i0 = 0.3 semi-circles; Inclination Angle at Reference Time
 
   short OmegaDot;   // -38      Rate of Right Ascen: semi-circles/sec
-  uchar svHealth;  
-  
+  uchar svHealth;
+
   int24 rootA;      // -11      Square Root of the Semi-Major Axis
   int24 Omega0;     // -23      Longitude of Ascending Node of Orbit Plane at Weekly Epoch 
   int24 omega;      // -23      Argument of Perigee
   int24 M0;         // -23      Mean Anom      
+
   struct {
     char af0msb;    // -20      SV Clock Bias Correction Coefficient
     char af1msb;    // -38      SV Clock Bias Correction Coefficient
-    char af1lsb :  3;
-    char af0lsb :  3;
-    char t      :  2;
+
+    char t : 2;  /// parity
+    char af0lsb : 3;
+    char af1lsb : 3;
   };
 } almMsg = { {'C', 'b'}, }; // s/b 28 bytes + 5 (@@ ... Chk CR LF) = 33 byte messages
 
@@ -252,15 +254,17 @@ const int width[12] = { 6,  8,  16,  8,   16,  16,  24,  24,   24,  24,  11,  11
 
 void setField(int field, char* line) {
   if (field == 1) {// svHealth
-    almMsg.svHealth = atoi(line + 28); return;
+    almMsg.svHealth = atoi(line + 27); 
+    if (almMsg.svHealth >= 63) almMsg.svHealth |= 0xC0;  // summary bits
+    return;
   }
 
   switch (width[field]) {
-    case  2: almMsg.w3msb.dataID = atoi(line + 28); return;  // never
-    case  6: almMsg.w3msb.svID = atoi(line + 28);  return;
+    case  2: almMsg.w3msb.dataID = atoi(line + 27); return;  // never
+    case  6: almMsg.w3msb.svID = atoi(line + 27);  return;
   }
 
-  double val = atof(line + 28);
+  double val = atof(line + 27);
   const double PI = 3.141592653589793238462643383279502884L;
   switch (field) {  
     case 4:
@@ -280,13 +284,13 @@ void setField(int field, char* line) {
     exit(-6);
   }
 
-  int set = (int)(val + 0.49999999); // most signed
+  int set = (int)round(val); // most signed
 
   // set field:  Big endian, beware sign!!
   switch (width[field]) {
     case  8: *(uchar*)(pField[field]) = (uchar)set; break;
     case 11:  // split
-      *(uchar*)(pField[field]) = (uchar)(set >> 3);
+      *(char*)(pField[field]) = (char)(set >> 3);
       switch (field) {
         case 10: almMsg.af0lsb = set & 7; break;
         case 11: almMsg.af1lsb = set & 7; break;
@@ -303,7 +307,6 @@ char BdResponse[23];
 
 void setSubframeAndPage(void) {
   int id = almMsg.w3msb.svID;
-  printf("\r%2d", id);
   almMsg.subframe = id < 25 ? 5 : 4;  // 24 in subframe 5, 8 in subframe 4  pgs 2..5  7..10
   int page = id;
   if (page >= 25) {
@@ -312,30 +315,48 @@ void setSubframeAndPage(void) {
       ++page;
   }
   almMsg.page = page;
+
+#if 0
+  printf("\r%2d", id);
+#else
+  uchar* p = (uchar*)&almMsg + 4;
+  int wordPos = 0;
+  for (int i = 4; i < sizeof almMsg; ++i) {
+    printf("%02X", *p++);
+    if (!(++wordPos % 3)) printf(" ");
+  }
+  printf("\n");
+
+#endif
+
 }
 
+// Almanac data from
+// https://celestrak.com/GPS/almanac/Yuma/2022/
+// https://gps.afspc.af.mil/gps/archive/2022/almanacs/yuma/
+
 void sendAlmanac() {
-  printf("   almanac");
-  FILE* alm = fopen("current.alm", "rb");
+  const char almPath[] = "../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0148.319488.txt";
+  printf("Almanac %s\n   Sat\r", strrchr(almPath, '/') + 1);
+  FILE* alm = fopen(almPath, "rt");
   if (!alm) exit(-5);
   almMsg.w3msb.dataID = 1;   // TODO: see pg. 113
   int week;
-  for (int sat = 1; sat <= 32; ++sat) {
+  while (1)  {
     char line[128];
-    if (fgets(line, sizeof(line), alm)) {  // skip header line - exit on end of file
-      week = atoi(line + 13);
+    if (!fgets(line, sizeof(line), alm)) break;  // skip header line - exit on end of file
+    week = atoi(line + 13);
     
-      for (int i = 0; i < 12; ++i) {
-        if (!fgets(line, sizeof(line), alm)) {
-          printf("%s", line);
-          exit(-7);
-        }
-        setField(i, line);
+    for (int i = 0; i < 12; ++i) {
+      if (!fgets(line, sizeof(line), alm)) {
+        printf("%s", line);
+        exit(-7);
       }
+      setField(i, line);
+    }
 
-      fgets(line, sizeof(line), alm);  // skip week
-      fgets(line, sizeof(line), alm);  // skip blank line
-    } 
+    fgets(line, sizeof(line), alm);  // skip week
+    fgets(line, sizeof(line), alm);  // skip blank line
 
     setSubframeAndPage();
     motoCmd(&almMsg, sizeof(almMsg), &response, 9);
@@ -343,21 +364,27 @@ void sendAlmanac() {
 
   // svID 28 currently missing
   almMsg.w3msb.svID = 28;
+  almMsg.toa = 0x90; // why?
+  almMsg.svHealth = 0xFF;  // bad? -- not in Sirf data!
   setSubframeAndPage();
   motoCmd(&almMsg, sizeof(almMsg), &response, 9);
 
+#if 1
   // TODO: health from svHealth ( 0 = OK )
   // svConfig codes 0 = no info
   uchar toa = almMsg.toa;
-  almMsg.page = 25;
   almMsg.subframe = 4; // p 87
+  almMsg.page = 25;
   memset(&almMsg.eccentric, 0, sizeof(almMsg) - 5); 
+  // TODO: mark 28 bad
   motoCmd(&almMsg, sizeof(almMsg), &response, 9);
 
   almMsg.subframe = 5; // p 83
   almMsg.page25.toa = toa; // ?? scale ??, offset TODO
   almMsg.page25.week = week & 0xFF; 
+  // TODO: mark 28 bad
   motoCmd(&almMsg, sizeof(almMsg), &response, 9);
+#endif
 
   // see also p 117, 120, 226
 
@@ -416,6 +443,8 @@ int main() {
   motoCmd("Cj", 2, &response, 294);
   printf("%s\n", response + 4); // ID
 
+  motoCmd("Cg\000", 3); // position fix off
+
   motoCmd(NUM_CHANNELS == 6 ? "Ba\000" : "Ea\000", 3, response, NUM_CHANNELS == 6 ? 68 : 76); // poll mode
   // motoCmd(cmd_En, sizeof cmd_En, &response, sizeof En_status);
 
@@ -423,13 +452,12 @@ int main() {
   motoCmd("Bd\000", 3, almStatus, sizeof(almStatus));
   if (almStatus[4]) { // save alamanc
     motoCmd("Be\000", 3, almanac, sizeof(almanac)); // request almanac data    
-    // https://celestrak.com/GPS/almanac/Yuma/2022/
-    // https://gps.afspc.af.mil/gps/archive/2022/almanacs/yuma/
-    FILE* alm = fopen("../../Desktop/Tools/Modules/GPS/148.037.alm.txt", "wb");
+    FILE* alm = fopen("Moto.alm", "wb");
     fwrite(almanac, 1, bytesRead, alm);
     fclose(alm);
-  } else if (0) {
-    motoCmd("Cf", 2); // factory defaults    returns Cg0 -- why?
+  } else if (1) {
+    motoCmd("Cf", 2, &response, 7); // factory defaults    returns Cg0 -- why?
+
     sendAlmanac();
     Sleep(1000);  // process almanac
     motoCmd("Bd\000", 3, almStatus, sizeof(almStatus));
@@ -483,7 +511,7 @@ int main() {
     while (!_kbhit()) {
       if (motoCmd(NUM_CHANNELS == 6 ? "Ba\000" : "Ea\000", 3, &baMsg, sizeof(baMsg)) && bytesRead == sizeof(baMsg)) { // unsolicited 1/sec  (or slower with longer serial timeout)
         for (int s = 0; s < NUM_CHANNELS; ++s)
-          printf("%3d:%X%+3d ", baMsg.sat[s].satID, baMsg.sat[s].trackMode, (char)(baMsg.sat[s].SNR + 127));
+          printf("%3d:%X%+3d ", baMsg.sat[s].satID, baMsg.sat[s].trackMode, (char)(baMsg.sat[s].SNR + 100));
 
         printf("%X", *(uchar*)&baMsg.rcvrStatus);
       } else printf("Read %d", bytesRead);
