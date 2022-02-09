@@ -8,18 +8,33 @@
 
 // Motorola Oncore and Sirf GPS experiments
 
-#define Sirf
-
 // TODO: almanac svHealth to pg 25 fields
 // TODO: t field parity?
 
-const int NUM_CHANNELS = 6;  // or 6, 12  - TODO: auto-set via model # A vs. B , ...
+const int NUM_CHANNELS = 8;  // or 6, 12  - TODO: auto-set via model # A vs. B , ...
+
+#define Sirf  // comment out for Moto Oncore
+
+
+// common routines
 
 #pragma warning(disable : 6031)
 
 typedef unsigned char uchar;
 typedef unsigned short ushort;
 typedef unsigned int uint;
+
+void bigEnd(int& le) {
+  le = _byteswap_ulong((uint)le);
+}
+
+void bigEnd(uint& le) {
+  le = _byteswap_ulong(le);
+}
+
+void bigEnd(ushort& le) {
+  le = _byteswap_ushort(le);
+}
 
 HANDLE hCom = NULL;
 DCB dcb;
@@ -66,7 +81,194 @@ void setComm(int baudRate, bool dtrEnable = true, bool rtsEnable = true) {
   SetCommState(hCom, &dcb);
 }
 
-#ifndef Sirf  
+void nmeaCmd(const char* cmd) { // w/o $ and *
+  int chksum = 0;
+  const char* p = cmd;
+  while (*p) chksum ^= *p++;
+
+  char send[256];
+  int len = sprintf(send, "$%s*%02X\r\n", cmd, chksum);
+  WriteFile(hCom, send, len, NULL, NULL);
+}
+
+// Almanac: See IS-GPS- 200M pg 82, 116
+// all signed except eccentric, toa
+// 32! PRNs, 33 bytes each - 9 ovhd = 24 * 8 bits each
+
+// Almanac file from https://www.navcen.uscg.gov/?pageName=gpsAlmanacs
+/*
+******** Week 147 almanac for PRN-01 ********
+ID:                         01
+Health:                     000
+Eccentricity:               0.1132822037E-001
+Time of Applicability(s):  233472.0000            0..602112 secs    2^20 >> 12
+
+Orbital Inclination(rad):   0.9865078384
+Rate of Right Ascen(r/s):  -0.8114623721E-008
+SQRT(A)  (m 1/2):           5153.621094           2530 to 8192
+Right Ascen at Week(rad):  -0.1660719209E+001
+
+Argument of Perigee(rad):   0.882766995
+Mean Anom(rad):             0.3052278345E+001
+Af0(s):                     0.4425048828E-003
+Af1(s/s):                  -0.1091393642E-010
+week:                        147
+
+******** Week 147 almanac for PRN-02 ********
+...
+
+*/
+
+#pragma pack(1)
+
+typedef struct {
+  char b[3];
+} int24;
+
+
+// TODO: check byte order of words, within words (Motorola typically Big endian in memory, same as satellite)
+// left on IS-GPS-200M charts = LSB?
+// MSB arrow?
+
+// see also Sirf 3-22 order
+
+typedef struct {
+  // Big endian
+  struct {
+    uchar svID : 6;
+    uchar dataID : 2;   // TODO: see pg. 113
+  } w3msb;
+  union {
+    unsigned short eccentric;  // -21      Eccentricity
+    struct {
+      uchar toa;
+      uchar week;
+    } page25;
+  };
+  // scale (2^N LSB)
+  uchar toa;        //  12      Time of Applicability (seconds)
+  short deltaI;     // -19      - i0 = 0.3 semi-circles; Inclination Angle at Reference Time
+
+  short OmegaDot;   // -38      Rate of Right Ascen: semi-circles/sec
+  uchar svHealth;
+
+  int24 rootA;      // -11      Square Root of the Semi-Major Axis
+  int24 Omega0;     // -23      Longitude of Ascending Node of Orbit Plane at Weekly Epoch 
+  int24 omega;      // -23      Argument of Perigee
+  int24 M0;         // -23      Mean Anom      
+
+  struct {
+    char af0msb;    // -20      SV Clock Bias Correction Coefficient
+    char af1msb;    // -38      SV Clock Bias Correction Coefficient
+
+    char t : 2;  /// parity
+    char af0lsb : 3;
+    char af1lsb : 3;
+  };
+} almData;
+
+almData alm;
+
+
+// fields in .alm file order:
+void* const pField[12] = { &alm.w3msb, &alm.svHealth, &alm.eccentric, &alm.toa,
+                           &alm.deltaI, &alm.OmegaDot, &alm.rootA, &alm.Omega0,
+                           &alm.omega, &alm.M0, &alm.af0msb, &alm.af1msb };
+const int scale[12] = { 0,  0, -21, 12,  -19, -38, -11, -23,  -23, -23, -20, -38 }; // scale LSB
+const int width[12] = { 6,  8,  16,  8,   16,  16,  24,  24,   24,  24,  11,  11 };
+
+
+void setField(int field, char* line) {
+  if (field == 1) {// svHealth
+    alm.svHealth = atoi(line + 27);
+    if (alm.svHealth >= 63) alm.svHealth |= 0xC0;  // summary bits
+    return;
+  }
+
+  switch (width[field]) {
+  case  2: alm.w3msb.dataID = atoi(line + 27); return;  // never
+  case  6: alm.w3msb.svID = atoi(line + 27);  return;
+  }
+
+  double val = atof(line + 27);
+  const double PI = 3.141592653589793238462643383279502884L;
+  switch (field) {
+  case 4:
+  case 5:
+  case 7:
+  case 8:
+  case 9:
+    val /= PI; // rads -> semi-circles
+    break;
+  }
+  if (field == 4) val -= 0.3; // subtract 0.3 for deltaI
+
+  val /= pow(2, scale[field]);  // scale  LSB 
+
+  if (val >= pow(2, width[field]) || val < -pow(2, width[field] - 1)) {  // check fit in width
+    printf("In %s field %d of svID %d: %.0f won't fit\n", line, field, alm.w3msb.svID, val);
+    exit(-6);
+  }
+
+  int set = (int)round(val); // most signed
+
+  // set field:  Big endian, beware sign!!
+  switch (width[field]) {
+  case  8: *(uchar*)(pField[field]) = (uchar)set; break;
+  case 11:  // split
+    *(char*)(pField[field]) = (char)(set >> 3);
+    switch (field) {
+    case 10: alm.af0lsb = set & 7; break;
+    case 11: alm.af1lsb = set & 7; break;
+    }
+    break;
+
+  case 16: {unsigned short bigEnd = _byteswap_ushort((unsigned short)set); *(unsigned short*)pField[field] = bigEnd; } break;
+  case 24: {unsigned long  bigEnd = _byteswap_ulong((unsigned long)set); memcpy(pField[field], (char*)&bigEnd + 1, 3); } break;
+  default: printf("Width %d!\n", width[field]); break;
+  }
+}
+
+// Almanac data from
+// https://celestrak.com/GPS/almanac/Yuma/2022/
+// https://gps.afspc.af.mil/gps/archive/2022/almanacs/yuma/
+
+void almanacPage(almData almd);
+
+int convertAlmanac() {  // returns GPS week 
+  const char almPath[] = "../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0148.319488.txt";
+  printf("Almanac %s\n   Sat\r", strrchr(almPath, '/') + 1);
+  FILE* almf = fopen(almPath, "rt");
+  if (!almf) exit(-5);
+  alm.w3msb.dataID = 1;   // TODO: see pg. 113
+  int week;
+  while (1) {
+    char line[128];
+    if (!fgets(line, sizeof(line), almf)) break;  // skip header line - exit on end of file
+    week = atoi(line + 13);
+
+    for (int i = 0; i < 12; ++i) {
+      if (!fgets(line, sizeof(line), almf)) {
+        printf("%s", line);
+        exit(-7);
+      }
+      setField(i, line);
+    }
+
+    fgets(line, sizeof(line), almf);  // skip week
+    fgets(line, sizeof(line), almf);  // skip blank line
+
+    almanacPage(alm);
+  }
+  fclose(almf);
+  printf("\n for week %d\n", week);
+
+  return week;
+}
+
+
+
+#ifndef Sirf  // Moto Oncore
 
 // Moto Oncore
 
@@ -170,150 +372,16 @@ struct {
 } baMsg;
 
 
-
-// Almanac: See IS-GPS- 200M pg 82, 116
-// all signed except eccentric, toa
-// 32! PRNs, 33 bytes each - 9 ovhd = 24 * 8 bits each
-
-// Almanac file from https://www.navcen.uscg.gov/?pageName=gpsAlmanacs
-/*
-******** Week 147 almanac for PRN-01 ********
-ID:                         01
-Health:                     000
-Eccentricity:               0.1132822037E-001
-Time of Applicability(s):  233472.0000            0..602112 secs    2^20 >> 12
-
-Orbital Inclination(rad):   0.9865078384
-Rate of Right Ascen(r/s):  -0.8114623721E-008
-SQRT(A)  (m 1/2):           5153.621094           2530 to 8192
-Right Ascen at Week(rad):  -0.1660719209E+001
-
-Argument of Perigee(rad):   0.882766995
-Mean Anom(rad):             0.3052278345E+001
-Af0(s):                     0.4425048828E-003
-Af1(s/s):                  -0.1091393642E-010
-week:                        147
-
-******** Week 147 almanac for PRN-02 ********
-...
-
-*/
-
-#pragma pack(1)
-
-typedef struct {
-  char b[3];
-} int24;
-
-
-// TODO: check byte order of words, within words (Motorola typically Big endian in memory, same as satellite)
-// left on IS-GPS-200M charts = LSB?
-// MSB arrow?
-
-// see also Sirf 3-22 order
-
 struct {
   char cmd[2];     // Cb
   uchar subframe;  // 5: pg 1..25;  4: 2..5, 7..10. 25
   uchar page;
-
-  // Big endian
-  struct {
-    uchar svID : 6;
-    uchar dataID : 2;   // TODO: see pg. 113
-  } w3msb;
-  union {
-    unsigned short eccentric;  // -21      Eccentricity
-    struct {
-      uchar toa;
-      uchar week;
-    } page25;
-  };
-                    // scale (2^N LSB)
-  uchar toa;        //  12      Time of Applicability (seconds)
-  short deltaI;     // -19      - i0 = 0.3 semi-circles; Inclination Angle at Reference Time
-
-  short OmegaDot;   // -38      Rate of Right Ascen: semi-circles/sec
-  uchar svHealth;
-
-  int24 rootA;      // -11      Square Root of the Semi-Major Axis
-  int24 Omega0;     // -23      Longitude of Ascending Node of Orbit Plane at Weekly Epoch 
-  int24 omega;      // -23      Argument of Perigee
-  int24 M0;         // -23      Mean Anom      
-
-  struct {
-    char af0msb;    // -20      SV Clock Bias Correction Coefficient
-    char af1msb;    // -38      SV Clock Bias Correction Coefficient
-
-    char t : 2;  /// parity
-    char af0lsb : 3;
-    char af1lsb : 3;
-  };
+  almData data;
 } almMsg = { {'C', 'b'}, }; // s/b 28 bytes + 5 (@@ ... Chk CR LF) = 33 byte messages
 
-// fields in .alm file order:
-void* const pField[12] = { &almMsg.w3msb, &almMsg.svHealth, &almMsg.eccentric, &almMsg.toa,
-                           &almMsg.deltaI, &almMsg.OmegaDot, &almMsg.rootA, &almMsg.Omega0,
-                           &almMsg.omega, &almMsg.M0, &almMsg.af0msb, &almMsg.af1msb };
-const int scale[12] = { 0,  0, -21, 12,  -19, -38, -11, -23,  -23, -23, -20, -38}; // scale LSB
-const int width[12] = { 6,  8,  16,  8,   16,  16,  24,  24,   24,  24,  11,  11};
-
-
-void setField(int field, char* line) {
-  if (field == 1) {// svHealth
-    almMsg.svHealth = atoi(line + 27); 
-    if (almMsg.svHealth >= 63) almMsg.svHealth |= 0xC0;  // summary bits
-    return;
-  }
-
-  switch (width[field]) {
-    case  2: almMsg.w3msb.dataID = atoi(line + 27); return;  // never
-    case  6: almMsg.w3msb.svID = atoi(line + 27);  return;
-  }
-
-  double val = atof(line + 27);
-  const double PI = 3.141592653589793238462643383279502884L;
-  switch (field) {  
-    case 4:
-    case 5: 
-    case 7:
-    case 8:
-    case 9:
-      val /= PI; // rads -> semi-circles
-      break;
-  }
-  if (field == 4) val -= 0.3; // subtract 0.3 for deltaI
-
-  val /= pow(2, scale[field]);  // scale  LSB 
-
-  if (val >= pow(2, width[field]) || val < -pow(2, width[field] - 1)) {  // check fit in width
-    printf("In %s field %d of svID %d: %.0f won't fit\n", line, field, almMsg.w3msb.svID, val);
-    exit(-6);
-  }
-
-  int set = (int)round(val); // most signed
-
-  // set field:  Big endian, beware sign!!
-  switch (width[field]) {
-    case  8: *(uchar*)(pField[field]) = (uchar)set; break;
-    case 11:  // split
-      *(char*)(pField[field]) = (char)(set >> 3);
-      switch (field) {
-        case 10: almMsg.af0lsb = set & 7; break;
-        case 11: almMsg.af1lsb = set & 7; break;
-      }
-      break;
-
-     case 16: {unsigned short bigEnd = _byteswap_ushort((unsigned short)set); *(unsigned short*)pField[field] = bigEnd; } break;
-     case 24: {unsigned long  bigEnd = _byteswap_ulong((unsigned long)set); memcpy(pField[field], (char*)&bigEnd + 1, 3); } break;
-     default: printf("Width %d!\n", width[field]); break;
-  }
-}
-
-char BdResponse[23];
 
 void setSubframeAndPage(void) {
-  int id = almMsg.w3msb.svID;
+  int id = alm.w3msb.svID;
   almMsg.subframe = id < 25 ? 5 : 4;  // 24 in subframe 5, 8 in subframe 4  pgs 2..5  7..10
   int page = id;
   if (page >= 25) {
@@ -335,71 +403,43 @@ void setSubframeAndPage(void) {
   printf("\n");
 
 #endif
-
 }
 
-// Almanac data from
-// https://celestrak.com/GPS/almanac/Yuma/2022/
-// https://gps.afspc.af.mil/gps/archive/2022/almanacs/yuma/
+void almanacPage(almData almd) {
+  almMsg.data = almd;
+  setSubframeAndPage();
+  motoCmd(&almMsg, sizeof(almMsg), &response, 9);
+}
 
 void sendAlmanac() {
-  const char almPath[] = "../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0148.319488.txt";
-  printf("Almanac %s\n   Sat\r", strrchr(almPath, '/') + 1);
-  FILE* alm = fopen(almPath, "rt");
-  if (!alm) exit(-5);
-  almMsg.w3msb.dataID = 1;   // TODO: see pg. 113
-  int week;
-  while (1)  {
-    char line[128];
-    if (!fgets(line, sizeof(line), alm)) break;  // skip header line - exit on end of file
-    week = atoi(line + 13);
-    
-    for (int i = 0; i < 12; ++i) {
-      if (!fgets(line, sizeof(line), alm)) {
-        printf("%s", line);
-        exit(-7);
-      }
-      setField(i, line);
-    }
+  int week = convertAlmanac();
 
-    fgets(line, sizeof(line), alm);  // skip week
-    fgets(line, sizeof(line), alm);  // skip blank line
-
-    setSubframeAndPage();
-    motoCmd(&almMsg, sizeof(almMsg), &response, 9);
-  }
-
-  // svID 28 currently missing
-  almMsg.w3msb.svID = 28;
-  almMsg.toa = 0x90; // why?
-  almMsg.svHealth = 0xFF;  // bad? -- not in Sirf data!
+  // svID 28 data currently missing ??
+  almMsg.data.w3msb.svID = 28;
+  almMsg.data.toa = 0x90; // why?
+  almMsg.data.svHealth = 0xFF;  // bad? -- not in Sirf data!
   setSubframeAndPage();
   motoCmd(&almMsg, sizeof(almMsg), &response, 9);
 
 #if 1
   // TODO: health from svHealth ( 0 = OK )
   // svConfig codes 0 = no info
-  uchar toa = almMsg.toa;
+  uchar toa = almMsg.data.toa;
   almMsg.subframe = 4; // p 87
   almMsg.page = 25;
-  memset(&almMsg.eccentric, 0, sizeof(almMsg) - 5); 
+  memset(&almMsg.data.eccentric, 0, sizeof(almData) - 1); 
   // TODO: mark 28 bad
   motoCmd(&almMsg, sizeof(almMsg), &response, 9);
 
   almMsg.subframe = 5; // p 83
-  almMsg.page25.toa = toa; // ?? scale ??, offset TODO
-  almMsg.page25.week = week & 0xFF; 
+  almMsg.data.page25.toa = toa; // ?? scale ??, offset TODO
+  almMsg.data.page25.week = week & 0xFF; 
   // TODO: mark 28 bad
   motoCmd(&almMsg, sizeof(almMsg), &response, 9);
 #endif
 
   // see also p 117, 120, 226
-
-  fclose(alm);
-
-  printf("\n for week %d\n", week);
 }
-
 
 uchar cmd_En[] = { 'E', 'n', 0, 1, 0, 10, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // PPS on when lock first satellite
 
@@ -583,17 +623,6 @@ int main() {
 
 #else // Sirf  GPS-500, VKE-17
 
-
-void nmeaCmd(const char* cmd) { // w/o $ and *
-  int chksum = 0;
-  const char* p = cmd;
-  while (*p) chksum ^= *p++;
-
-  char send[256];
-  int len = sprintf(send, "$%s*%02X\r\n", cmd, chksum);
-  WriteFile(hCom, send, len, NULL, NULL);
-}
-
 // Initialize Data Source – Message ID 128
 
 /*
@@ -614,13 +643,13 @@ If SiRFDemo is used to enable NavLib data, the bit rate is automatically set to 
 #pragma pack(1)
 
 struct {
-  uchar id;
-  int x, y, z; // Big endian
-  int drift;
-  uint tow;
+  uchar  id;
+  int    x, y, z; // Big endian
+  int    drift;
+  uint   tow;
   ushort week;
-  uchar channels;
-  uchar reset;
+  uchar  channels;
+  uchar  reset;
 } initNav = {128,-2694294,-4303469,3847444,91446,0,2196,12,0x51};   // RTC imprecise (1 sec)
 
 
@@ -635,19 +664,6 @@ void sirfCmd(void* cmd, int len) {
   WriteFile(hCom, pre, 4, NULL, NULL);
   WriteFile(hCom, cmd, len, NULL, NULL);
   WriteFile(hCom, post, 4, NULL, NULL);
-}
-
-
-void bigEnd(int& le) {
-  le = _byteswap_ulong(le);
-}
-
-void bigEnd(uint& le) {
-  le = _byteswap_ulong(le);
-}
-
-void bigEnd(ushort& le) {
-  le = _byteswap_ushort(le);
 }
 
 uchar line[4096];
