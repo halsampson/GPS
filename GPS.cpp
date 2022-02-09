@@ -6,21 +6,27 @@
 #include <time.h> 
 #include <math.h>
 
+// Motorola Oncore and Sirf GPS experiments
 
-// Motorola Oncore
+#define Sirf
 
-// TODO: check bit, byte order of @@Cb data
-// TODO: svHealth data to pg 25s
-// TODO: t filed parity
+// TODO: almanac svHealth to pg 25 fields
+// TODO: t field parity?
+
+const int NUM_CHANNELS = 6;  // or 6, 12  - TODO: auto-set via model # A vs. B , ...
+
+#pragma warning(disable : 6031)
 
 typedef unsigned char uchar;
+typedef unsigned short ushort;
+typedef unsigned int uint;
 
 HANDLE hCom = NULL;
 DCB dcb;
 
 void setResponseMs(DWORD ms) {
   COMMTIMEOUTS timeouts = { 0 };  // in ms
-  timeouts.ReadIntervalTimeout = 100; // between charaters
+  timeouts.ReadIntervalTimeout = 10; // between charaters
   timeouts.ReadTotalTimeoutMultiplier = 10; // * num requested chars
   timeouts.ReadTotalTimeoutConstant = ms; // + this = total timeout
   if (!SetCommTimeouts(hCom, &timeouts))  printf("Can't SetCommTimeouts\n");
@@ -60,7 +66,9 @@ void setComm(int baudRate, bool dtrEnable = true, bool rtsEnable = true) {
   SetCommState(hCom, &dcb);
 }
 
-#if 1  // 0 = GPS-500; 1 = Oncore
+#ifndef Sirf  
+
+// Moto Oncore
 
 DWORD bytesRead;
 uchar response[304];  // longest is Cj 294
@@ -80,10 +88,11 @@ bool motoCmd(const void* cmd, int len, void* pResponse = response, int responseL
       WriteFile(hCom, send, 2 + len + 3, NULL, NULL);
     }
 
+    if (!pResponse) return true;
+
     if (responseLen < 0) responseLen = 2 + len + 3;
     bool OK = ReadFile(hCom, pResponse, responseLen, &bytesRead, NULL);
     ((char*)(pResponse))[bytesRead] = 0;
-
 
     if (((char*)pResponse)[2] == 'Q') {  // QX after power cycle
       printf("Q");
@@ -101,8 +110,6 @@ bool motoCmd(const void* cmd, int len, void* pResponse = response, int responseL
     Sleep(1000);
   } 
 }
-
-const int NUM_CHANNELS = 8;  // or 6, 12  - could auto-set via lack of response to @@Ea with 6 channel recvrs; @@Ha with 6/8 ch
 
 struct {
   char atat[2]; // @@
@@ -133,7 +140,7 @@ struct {
     // 6 - Satellite Time Available
     // 7 - Ephemeris Acquire
     // 8 - Avail for Position
-    char SNR;
+    uchar SNR;
     struct {
       uchar used : 1;
       uchar momAlert : 1;
@@ -316,7 +323,7 @@ void setSubframeAndPage(void) {
   }
   almMsg.page = page;
 
-#if 0
+#if 1
   printf("\r%2d", id);
 #else
   uchar* p = (uchar*)&almMsg + 4;
@@ -424,7 +431,7 @@ uchar almanac[34*33];
 int main() {
 
   if (sizeof(almMsg) != 33 - 5) exit(sizeof(almMsg));
-  if (sizeof(En_status) != 69) exit(sizeof(En_status));
+  if (sizeof(En_status) != 29 + NUM_CHANNELS * 5) exit(sizeof(En_status));
 
 #if 1
   if (!openSerial("COM3", 9600)) exit(-1);
@@ -446,16 +453,17 @@ int main() {
   motoCmd("Cg\000", 3); // position fix off
 
   motoCmd(NUM_CHANNELS == 6 ? "Ba\000" : "Ea\000", 3, response, NUM_CHANNELS == 6 ? 68 : 76); // poll mode
-  // motoCmd(cmd_En, sizeof cmd_En, &response, sizeof En_status);
 
   char almStatus[23];
   motoCmd("Bd\000", 3, almStatus, sizeof(almStatus));
   if (almStatus[4]) { // save alamanc
+    printf("Saving almanac ...");
     motoCmd("Be\000", 3, almanac, sizeof(almanac)); // request almanac data    
     FILE* alm = fopen("Moto.alm", "wb");
     fwrite(almanac, 1, bytesRead, alm);
     fclose(alm);
-  } else if (1) {
+    printf("\n");
+  } else if (0) {
     motoCmd("Cf", 2, &response, 7); // factory defaults    returns Cg0 -- why?
 
     sendAlmanac();
@@ -464,7 +472,7 @@ int main() {
     printf("Almanac %s\n", almStatus[4] ? "OK" : "bad!");
   }
 
-  ReadFile(hCom, response, sizeof(response), &bytesRead, NULL);  // flush
+  // ReadFile(hCom, response, sizeof(response), &bytesRead, NULL);  // flush
 
   if (1) { // ignored if already fixing position
     // set date / time
@@ -502,26 +510,70 @@ int main() {
   printf("GMT date: %X/%X/%d\n", response[4], response[5], year);
 
   motoCmd("AB\004", 3); // set Application type static 
-
-  motoCmd("Ag\000", 3); // set mask angle to 0 to use full sky
-
   motoCmd("Cg\001", 3); // position fix mode (for VP units)
-  
+
+  motoCmd(cmd_En, sizeof cmd_En, NUM_CHANNELS >= 8 ? &response : NULL, sizeof En_status);  // enable 1 PPS
+  // printf(" %d %d %d %d", En_status.pulseStatus, En_status.solnStatus, En_status.RAIM_Status, En_status.negSawtooth);
+
+#if 0
+  motoCmd("Ah\001", 3);  // manual satellite selection  
+
+  // initial Chs: 1 6 9 14 20 22 24 25
+  int onDeck[] = { 2, 3, 4, 5,  7, 8,  10, 11, 12, 13,  15, 16, 17, 18, 19,  21,  23,  26, 27, 28, 29, 30, 31, 32 };
+  int oldPtr = 0;
+
+  int bestSVs[] = { 29, 18, 20, 26,  23, 15, 13, 2,  0 };  // get from Sirf
+  for (int ch = 0; bestSVs[ch]; ++ch) {
+    char satSelect[16];
+    sprintf(satSelect, "Ai%c%c", ch + 1, bestSVs[ch]);
+    motoCmd(satSelect, 4);
+  }
+#endif
+
+#if 0
+  motoCmd("Bl/001", 3, NULL);
+
+  while (1) {
+    char broadcast[41];
+    DWORD bytesRead;
+    ReadFile(hCom, broadcast, sizeof(broadcast), &bytesRead, NULL);
+    if (bytesRead) {
+      for (int i = 0; i < sizeof(broadcast); ++i)
+        printf("%02X", broadcast[i]);
+      printf("\n");
+    }
+  }
+#endif
+
   do {
     while (!_kbhit()) {
-      if (motoCmd(NUM_CHANNELS == 6 ? "Ba\000" : "Ea\000", 3, &baMsg, sizeof(baMsg)) && bytesRead == sizeof(baMsg)) { // unsolicited 1/sec  (or slower with longer serial timeout)
-        for (int s = 0; s < NUM_CHANNELS; ++s)
-          printf("%3d:%X%+3d ", baMsg.sat[s].satID, baMsg.sat[s].trackMode, (char)(baMsg.sat[s].SNR + 100));
-
+      if (motoCmd(NUM_CHANNELS == 6 ? "Ba\000" : "Ea\000", 3, &baMsg, sizeof(baMsg)) && bytesRead == sizeof(baMsg)) { // unsolicited 1/sec  (or slower with longer serial timeout)        
+      
+        int worstSignal = 256;
+        int worstCh, worstSV;
+        for (int s = 0; s < NUM_CHANNELS; ++s) {
+          printf("%2d:%d+%3d  ", baMsg.sat[s].satID, baMsg.sat[s].trackMode, baMsg.sat[s].SNR);
+          if (baMsg.sat[s].SNR < worstSignal) {  // no signal -> 100 ??
+            worstSignal = baMsg.sat[s].SNR;
+            worstSV = baMsg.sat[s].satID;
+            worstCh = s;
+          }
+        }
         printf("%X", *(uchar*)&baMsg.rcvrStatus);
+
+#if 0
+        // "The signal strength value is meaningless when the channel tracking mode is zero."  *****
+        // kick out worst signal, replace with channel thrown out longest ago
+        char satSelect[16];
+        sprintf(satSelect, "Ai%c%c", worstCh + 1, onDeck[oldPtr]);  
+        motoCmd(satSelect, 4);
+        onDeck[oldPtr] = worstSV;
+        if (++oldPtr >= 24)
+          oldPtr = 0;
+#endif
       } else printf("Read %d", bytesRead);
-
-      motoCmd(cmd_En, sizeof cmd_En, &response, sizeof En_status);
-      printf(" %d %d %d %d", En_status.pulseStatus, En_status.solnStatus, En_status.RAIM_Status, En_status.negSawtooth);
-
       printf("\n");
-
-      Sleep(5000);  // or more
+      Sleep(5000); // * (32 - 8) = 24 satellites to check
     }
   } while (_getch() != 27);  // Escape
 
@@ -529,7 +581,7 @@ int main() {
 }
 
 
-#else //  GPS-500  Sirf III
+#else // Sirf  GPS-500, VKE-17
 
 
 void nmeaCmd(const char* cmd) { // w/o $ and *
@@ -542,17 +594,141 @@ void nmeaCmd(const char* cmd) { // w/o $ and *
   WriteFile(hCom, send, len, NULL, NULL);
 }
 
-char line[4096];
+// Initialize Data Source – Message ID 128
+
+/*
+If Nav Lib data are enabled, the resulting messages are enabled: 
+  Clock Status(Message ID 7),  
+  50BPS(Message ID 8) *****,
+  Raw DGPS(Message ID 17), 
+  NL Measurement Data(Message ID 28), 
+  DGPS Data(Message ID 29), 
+  SV State Data (Message ID 30), and 
+  NL Initialized Data(Message ID 31). 
+  
+All messages sent at 1 Hz.
+
+If SiRFDemo is used to enable NavLib data, the bit rate is automatically set to 57600 by SiRFDemo.
+*/
+
+#pragma pack(1)
+
+struct {
+  uchar id;
+  int x, y, z; // Big endian
+  int drift;
+  uint tow;
+  ushort week;
+  uchar channels;
+  uchar reset;
+} initNav = {128,-2694294,-4303469,3847444,91446,0,2196,12,0x51};   // RTC imprecise (1 sec)
+
+
+void sirfCmd(void* cmd, int len) {
+  uchar pre[4] = {0xA0, 0xA2, (uchar)(len >> 8), (uchar)(len & 0xFF)};
+  int chkSum = 0;
+  for (int i = 0; i < len; ++i)
+    chkSum += (((uchar*)cmd)[i]) & 0x7FFF;
+
+  uchar post[4] = { (uchar)(chkSum >> 8), (uchar)(chkSum & 0xFF), 0xB0, 0xB3 };
+
+  WriteFile(hCom, pre, 4, NULL, NULL);
+  WriteFile(hCom, cmd, len, NULL, NULL);
+  WriteFile(hCom, post, 4, NULL, NULL);
+}
+
+
+void bigEnd(int& le) {
+  le = _byteswap_ulong(le);
+}
+
+void bigEnd(uint& le) {
+  le = _byteswap_ulong(le);
+}
+
+void bigEnd(ushort& le) {
+  le = _byteswap_ushort(le);
+}
+
+uchar line[4096];
 DWORD bytesRead;
 
 int main() {
-  openSerial("COM4", 4800);  
+  openSerial("COM6", 57600);
+
+  time_t rtime; time(&rtime);
+  time_t gpsSecs = rtime - 315964800; //  Jan 6, 1980 timestamp Epoch
+  const int weekSecs = 7 * 24 * 60 * 60;
+
+  int week = (int)(gpsSecs / weekSecs);
+  int tow = gpsSecs % weekSecs;  // from Saturday midnite GMT
+  tow += 18; // leap seconds
+
+  // send InitNav binary as below, with NavLab requested
+     // ??set message rate 1 for 50 BPS  - sniff what SirfDemo sends for this??
+  
+  bigEnd(initNav.x);
+  bigEnd(initNav.y);
+  bigEnd(initNav.z);
+  bigEnd(initNav.drift);
+  bigEnd(initNav.tow = tow);
+  bigEnd(initNav.week = week);
+  sirfCmd(&initNav, sizeof initNav);
+  // should check for ACK (message 11) vs. NACK (12)
+
+  // TODO: setAlmanac (130)
+
+  COMMTIMEOUTS timeouts = { 0 };  // in ms
+  timeouts.ReadTotalTimeoutConstant = 500; // added to below
+  timeouts.ReadTotalTimeoutMultiplier = 0; // * num requested chars
+  timeouts.ReadIntervalTimeout = 200; // between characters
+
+  if (!SetCommTimeouts(hCom, &timeouts))  printf("Can't SetCommTimeouts\n");
+
+  while (!_kbhit()) {
+    ReadFile(hCom, line, sizeof(line), &bytesRead, NULL);
+    if (bytesRead) {
+      for (DWORD i = 0; i < bytesRead; ++i) {
+        // parse for ID 08: 50 BPS data 
+        if (line[i] == 0xA0 && line[i + 1] == 0xA2) { // start sequence
+          int len = line[i + 2] * 256 + line[i + 3];
+          if (line[i + 4] == 8 || line[i + 4] == 13) {  // 50 PBS (every 6 sec) or visible list (every 2 minutes)
+            for (DWORD p = i + 4; p < i + 4 + len; ++p)
+              printf("%02X", line[p]);
+            printf("\n");
+          }
+          i += 4 + len + 4 - 1; // skip packet
+        }
+      }
+    }
+  }
+}
+
+
+
+void nmea() {
+  openSerial("COM6", 4800);
+
+  time_t rtime; time(&rtime);
+  time_t gpsSecs = rtime - 315964800; //  Jan 6, 1980 timestamp Epoch
+  const int weekSecs = 7 * 24 * 60 * 60;
+
+  int week = (int)(gpsSecs / weekSecs);
+  int tow = gpsSecs % weekSecs;  // from Saturday midnite GMT
+  tow += 18; // leap seconds
+
+  char initNav[64];
+  // TODO: update coords, oscillator offset
+  sprintf(initNav, "PSRF101,-2694294,-4303469,3847444,91446,%d,%d,12,17", tow, week);
+  nmeaCmd(initNav);
+  exit(0);
+
 
   while (1) {
-    nmeaCmd("PSRF100,0,4800,8,1,0");
+    nmeaCmd("PSRF100,0,4800,8,1,0"); // switch from NMEA to Sirf binary; send on split pin 1a
 
     while (!_kbhit()) {
-      ReadFile(hCom, line, sizeof(line), &bytesRead, NULL);
+      ReadFile(hCom, line, 200, &bytesRead, NULL);
       if (bytesRead) {
         line[bytesRead] = 0;
         printf("%s\n", line);
@@ -609,7 +785,6 @@ int main() {
   _getch();
 
   // chk SW version
-
   // nmeaCmd("PSRF103,06,00,00,01");
   // nmeaCmd("PSRF103,08,00,00,01");
 
@@ -622,27 +797,9 @@ int main() {
   }
   _getch();
 
-#if 1
-  nmeaCmd("PSRF100,0,4800,8,1,0");
-#elif 0
-  WriteFile(hCom, "$PSRF100,0,4800,8,1,0*0F\r\n", 26, NULL, NULL);  // switch from NMEA to Sirf binary; send on split pin 1a
-#elif 1
-  WriteFile(hCom, "$PSRF100,0,9600,8,1,0*0C\r\n", 27, NULL, NULL);  // switch from NMEA to Sirf binary; send on split pin 1a
+  nmeaCmd("PSRF100,0,4800,8,1,0"); // switch from NMEA to Sirf binary; send on split pin 1a
 
-  Sleep(200);
-
-  // Some Pharos don't respond or floating pins should be tied 
-  // 
-  // Pharos USB has TxD on pin 1a; 5V power
-  // What differs from FTDI which switches mode OK?
-    // Prolific PL-2303HX baud rate switch reset??
-    // pin 1b, 4 grounded vs. open -> no change
-    // 5V vs. 3.3V -> no change
-    // pin 6 not connected - OK
-    // different Pharos revs?
- 
-  setComm(9600); 
-#endif
+  // 2 Pharos don't respond on RxD or floating pins should be tied ??
 
   // Sirf binary messages start with A0 A2, end with B0 B3
 
@@ -660,6 +817,7 @@ int main() {
   fclose(sirf);
   CloseHandle(hCom);
 }
+
 /*
 Raw Sirf Almanac data -- week 147:
 
@@ -695,18 +853,6 @@ A0 A2 00 1E 0E 1D 25 01 5D 0E CB 0F 19 E5 FD 5B 00 A1 0D B1 8F 29 D4 5C 54 B9 E7
 A0 A2 00 1E 0E 1E 25 01 5E 2C EF 0F FB AD FD 3E 00 A1 0C 39 37 94 90 90 04 96 6E 5D CB BC FF FF 7E D3 0D C9 B0 B3
 A0 A2 00 1E 0E 1F 25 01 5F 55 AA 0F 08 1A FD 51 00 A1 0D 14 37 C6 8C 0F 3C 7C 5A 9B 20 EA FF F7 BD 52 0B 46 B0 B3
 A0 A2 00 1E 0E 20 25 01 60 2D 5F 0F 0A 4E FD 4E 00 A1 0D C2 0B D2 BC 9F D0 A4 FD 90 B8 F7 FF D9 49 B1 0E 1C B0 B3
-
-
-Other data:
-A0 A2 00 02 0B 92 00 9D B0 B3
-
-A0 A2 00 5B 29 00 01 00 00 08 93 22 AA D5 07 07 E6 02 05 11 21 59 D8 00 00 00 00 16 41 74 18 B7 41 81 39 00 00 15 82 00 00 1F 95 15 01 66 40 89 00 00 00 01 00 00 00 01 0E C7 00 01 AB 45 00 00 00 00 00 00 7F FF FF FF 00 00 00 00 00 1A 93 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 0F DA B0 B3
-A0 A2 00 BC 04 00 93 03 77 7B B3 0C 09 DC 82 00 AD 17 17 17 17 17 17 17 16 16 16 04 34 81 00 AD 13 13 13 13 13 13 13 13 13 12 10 26 54 00 AD 15 15 15 14 14 14 14 14 14 14 07 B2 59 00 2D 14 14 14 14 14 14 14 14 14 13 1E AA 25 00 2D 13 13 13 12 12 12 12 12 12 12 1B 45 1B 00 2D 15 15 15 15 15 14 14 14 14 14 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 0E B3 B0 B3
-A0 A2 00 29 02 FF D6 E4 F1 FF BE 54 94 00 3A B4 DF FF FD FF EE FF EA 00 00 00 00 93 03 77 7B B4 00 00 00 00 00 00 00 00 00 00 00 00 00 10 2C B0 B3
-A0 A2 00 09 09 7A 4C 60 00 00 0E 00 00 01 3D B0 B3
-A0 A2 00 14 07 08 93 03 77 7B B3 03 00 01 65 80 08 8E 89 20 22 AA D5 07 06 1A B0 B3
-A0 A2 00 34 1B 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 08 93 02 08 93 03 08 93 04 08 93 05 08 93 06 08 93 07 08 93 08 08 93 09 08 93 0A 08 93 0B 08 93 0C 08 93 07 AE B0 B3
-
 */
 
 #endif
