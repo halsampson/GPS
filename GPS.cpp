@@ -13,10 +13,10 @@
 
 const int NUM_CHANNELS = 8;  // or 6, 12  - TODO: auto-set via model # A vs. B , ...
 
-#define Sirf  // comment out for Moto Oncore
+// #define Sirf  // comment out for Moto Oncore
 
 
-// common routines
+// Common routines
 
 #pragma warning(disable : 6031)
 
@@ -41,7 +41,7 @@ DCB dcb;
 
 void setResponseMs(DWORD ms) {
   COMMTIMEOUTS timeouts = { 0 };  // in ms
-  timeouts.ReadIntervalTimeout = 10; // between charaters
+  timeouts.ReadIntervalTimeout = 100; // between charaters
   timeouts.ReadTotalTimeoutMultiplier = 10; // * num requested chars
   timeouts.ReadTotalTimeoutConstant = ms; // + this = total timeout
   if (!SetCommTimeouts(hCom, &timeouts))  printf("Can't SetCommTimeouts\n");
@@ -275,7 +275,7 @@ int convertAlmanac() {  // returns GPS week
 DWORD bytesRead;
 uchar response[304];  // longest is Cj 294
 
-bool motoCmd(const void* cmd, int len, void* pResponse = response, int responseLen = -1) {
+bool motoCmd(const void* cmd, int len, int responseLen = -1, void* pResponse = response) {
   while (1) {
     if (cmd) {
       uchar sum = 0;
@@ -290,7 +290,7 @@ bool motoCmd(const void* cmd, int len, void* pResponse = response, int responseL
       WriteFile(hCom, send, 2 + len + 3, NULL, NULL);
     }
 
-    if (!pResponse) return true;
+    if (!responseLen) return true; // no response
 
     if (responseLen < 0) responseLen = 2 + len + 3;
     bool OK = ReadFile(hCom, pResponse, responseLen, &bytesRead, NULL);
@@ -408,7 +408,7 @@ void setSubframeAndPage(void) {
 void almanacPage(almData almd) {
   almMsg.data = almd;
   setSubframeAndPage();
-  motoCmd(&almMsg, sizeof(almMsg), &response, 9);
+  motoCmd(&almMsg, sizeof(almMsg), 9);
 }
 
 void sendAlmanac() {
@@ -419,7 +419,7 @@ void sendAlmanac() {
   almMsg.data.toa = 0x90; // why?
   almMsg.data.svHealth = 0xFF;  // bad? -- not in Sirf data!
   setSubframeAndPage();
-  motoCmd(&almMsg, sizeof(almMsg), &response, 9);
+  motoCmd(&almMsg, sizeof(almMsg), 9);
 
 #if 1
   // TODO: health from svHealth ( 0 = OK )
@@ -429,13 +429,13 @@ void sendAlmanac() {
   almMsg.page = 25;
   memset(&almMsg.data.eccentric, 0, sizeof(almData) - 1); 
   // TODO: mark 28 bad
-  motoCmd(&almMsg, sizeof(almMsg), &response, 9);
+  motoCmd(&almMsg, sizeof(almMsg), 9);
 
   almMsg.subframe = 5; // p 83
   almMsg.data.page25.toa = toa; // ?? scale ??, offset TODO
   almMsg.data.page25.week = week & 0xFF; 
   // TODO: mark 28 bad
-  motoCmd(&almMsg, sizeof(almMsg), &response, 9);
+  motoCmd(&almMsg, sizeof(almMsg), 9);
 #endif
 
   // see also p 117, 120, 226
@@ -485,30 +485,31 @@ int main() {
   setResponseMs(1000);
   ReadFile(hCom, response, sizeof(response), &bytesRead, NULL);  // flush
 
-  setResponseMs(20000);  // ??
-
-  motoCmd("Cj", 2, &response, 294);
-  printf("%s\n", response + 4); // ID
+  setResponseMs(10000);  // ??
 
   motoCmd("Cg\000", 3); // position fix off
+  motoCmd("Bb\000", 3, 92);
 
-  motoCmd(NUM_CHANNELS == 6 ? "Ba\000" : "Ea\000", 3, response, NUM_CHANNELS == 6 ? 68 : 76); // poll mode
+  motoCmd("Cj", 2, 294);
+  printf("%s\n", response + 4); // ID
+
+  motoCmd(NUM_CHANNELS == 6 ? "Ba\000" : "Ea\000", 3, NUM_CHANNELS == 6 ? 68 : 76); // poll mode
 
   char almStatus[23];
-  motoCmd("Bd\000", 3, almStatus, sizeof(almStatus));
+  motoCmd("Bd\000", 3, sizeof(almStatus), almStatus);
   if (almStatus[4]) { // save alamanc
     printf("Saving almanac ...");
-    motoCmd("Be\000", 3, almanac, sizeof(almanac)); // request almanac data    
+    motoCmd("Be\000", 3, sizeof(almanac), almanac); // request almanac data    
     FILE* alm = fopen("Moto.alm", "wb");
     fwrite(almanac, 1, bytesRead, alm);
     fclose(alm);
     printf("\n");
   } else if (0) {
-    motoCmd("Cf", 2, &response, 7); // factory defaults    returns Cg0 -- why?
+    motoCmd("Cf", 2, 7); // factory defaults    returns Cg0 -- why?
 
     sendAlmanac();
     Sleep(1000);  // process almanac
-    motoCmd("Bd\000", 3, almStatus, sizeof(almStatus));
+    motoCmd("Bd\000", 3, sizeof(almStatus), almStatus);
     printf("Almanac %s\n", almStatus[4] ? "OK" : "bad!");
   }
 
@@ -542,7 +543,7 @@ int main() {
 
     posCmd.cmd = 'f';
     posCmd.val = _byteswap_ulong(height);
-    motoCmd(&posCmd, 7, &response, 15);    // slow reponse
+    motoCmd(&posCmd, 7, 15);    // slow reponse
   }
 
   motoCmd("Ac\377\377\377\377", 6);  // check date
@@ -552,7 +553,7 @@ int main() {
   motoCmd("AB\004", 3); // set Application type static 
   motoCmd("Cg\001", 3); // position fix mode (for VP units)
 
-  motoCmd(cmd_En, sizeof cmd_En, NUM_CHANNELS >= 8 ? &response : NULL, sizeof En_status);  // enable 1 PPS
+  motoCmd(cmd_En, sizeof cmd_En, NUM_CHANNELS >= 8 ? sizeof En_status : 0);  // enable 1 PPS
   // printf(" %d %d %d %d", En_status.pulseStatus, En_status.solnStatus, En_status.RAIM_Status, En_status.negSawtooth);
 
 #if 0
@@ -571,7 +572,7 @@ int main() {
 #endif
 
 #if 0
-  motoCmd("Bl/001", 3, NULL);
+  motoCmd("Bl/001", 3, 0);
 
   while (1) {
     char broadcast[41];
@@ -587,7 +588,7 @@ int main() {
 
   do {
     while (!_kbhit()) {
-      if (motoCmd(NUM_CHANNELS == 6 ? "Ba\000" : "Ea\000", 3, &baMsg, sizeof(baMsg)) && bytesRead == sizeof(baMsg)) { // unsolicited 1/sec  (or slower with longer serial timeout)        
+      if (motoCmd(NUM_CHANNELS == 6 ? "Ba\000" : "Ea\000", 3, sizeof(baMsg), &baMsg) && bytesRead == sizeof(baMsg)) { // unsolicited 1/sec  (or slower with longer serial timeout)        
       
         int worstSignal = 256;
         int worstCh, worstSV;
@@ -621,7 +622,9 @@ int main() {
 }
 
 
-#else // Sirf  GPS-500, VKE-17
+#else // Sirf  GPS-500, VK16E
+
+void almanacPage(almData almd) {};
 
 // Initialize Data Source – Message ID 128
 
@@ -650,7 +653,7 @@ struct {
   ushort week;
   uchar  channels;
   uchar  reset;
-} initNav = {128,-2694294,-4303469,3847444,91446,0,2196,12,0x51};   // RTC imprecise (1 sec)
+} initNav = {128,-2694294,-4303469,3847444,91477,0,2196,12,0x51};   // RTC imprecise (1 sec)
 
 
 void sirfCmd(void* cmd, int len) {
@@ -680,8 +683,7 @@ int main() {
   int tow = gpsSecs % weekSecs;  // from Saturday midnite GMT
   tow += 18; // leap seconds
 
-  // send InitNav binary as below, with NavLab requested
-     // ??set message rate 1 for 50 BPS  - sniff what SirfDemo sends for this??
+  // send InitNav with NavLab requested
   
   bigEnd(initNav.x);
   bigEnd(initNav.y);
@@ -701,23 +703,28 @@ int main() {
 
   if (!SetCommTimeouts(hCom, &timeouts))  printf("Can't SetCommTimeouts\n");
 
+  FILE* bps = fopen("../../../Desktop/Tools/Modules/GPS/sirf.bps.bin", "wb");
+
   while (!_kbhit()) {
     ReadFile(hCom, line, sizeof(line), &bytesRead, NULL);
     if (bytesRead) {
       for (DWORD i = 0; i < bytesRead; ++i) {
         // parse for ID 08: 50 BPS data 
         if (line[i] == 0xA0 && line[i + 1] == 0xA2) { // start sequence
-          int len = line[i + 2] * 256 + line[i + 3];
-          if (line[i + 4] == 8 || line[i + 4] == 13) {  // 50 PBS (every 6 sec) or visible list (every 2 minutes)
+          int len = line[i + 2] * 256 + line[i + 3];  // payload
+          if (line[i + 4] == 8) {  // 50 PBS (every 6 sec) 
             for (DWORD p = i + 4; p < i + 4 + len; ++p)
               printf("%02X", line[p]);
             printf("\n");
+
+            fwrite(line + 4 + 2, 1, len - 2, bps);
           }
           i += 4 + len + 4 - 1; // skip packet
         }
       }
     }
   }
+  fclose(bps);
 }
 
 
@@ -737,6 +744,10 @@ void nmea() {
   // TODO: update coords, oscillator offset
   sprintf(initNav, "PSRF101,-2694294,-4303469,3847444,91446,%d,%d,12,17", tow, week);
   nmeaCmd(initNav);
+
+
+  // TODO: set static navigation Msg 143 (freeze on low velocity)?
+
   exit(0);
 
 
