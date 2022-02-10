@@ -441,7 +441,7 @@ void sendAlmanac() {
   // see also p 117, 120, 226
 }
 
-uchar cmd_En[] = { 'E', 'n', 0, 1, 0, 10, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // PPS on when lock first satellite
+uchar cmd_En[] = { 'E', 'n', 0, 1, 0, 10, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // PPS on when lock to any satellite; TRAIM if possible
 
 struct {   // otaapnnnmdyyhmspysreen sffffsffffsffffsffffsffffsffffsffffsffff
   char cmd[4];  // @@En
@@ -474,7 +474,7 @@ int main() {
   if (sizeof(En_status) != 29 + NUM_CHANNELS * 5) exit(sizeof(En_status));
 
 #if 1
-  if (!openSerial("COM3", 9600)) exit(-1);
+  if (!openSerial("COM3", 9600)) exit(-1); // default on power-cycle
 #else
   if (!openSerial("COM3", 4800)) exit(-1);
   WriteFile(hCom, "$PMOTG,FOR,0*2A", 15, NULL, NULL);
@@ -488,6 +488,8 @@ int main() {
   setResponseMs(10000);  // ??
 
   motoCmd("Cg\000", 3); // position fix off
+  motoCmd("Ab\000\000\000", 5);  // set GMT offset
+  motoCmd("Aw\000", 3);  // GPS time
   motoCmd("Bb\000", 3, 92);
 
   motoCmd("Cj", 2, 294);
@@ -548,7 +550,7 @@ int main() {
 
   motoCmd("Ac\377\377\377\377", 6);  // check date
   int year = response[6] * 256 + response[7];
-  printf("GMT date: %X/%X/%d\n", response[4], response[5], year);
+  printf("GMT date: %d/%d/%d\n", response[4], response[5], year);
 
   motoCmd("AB\004", 3); // set Application type static 
   motoCmd("Cg\001", 3); // position fix mode (for VP units)
@@ -669,11 +671,14 @@ void sirfCmd(void* cmd, int len) {
   WriteFile(hCom, post, 4, NULL, NULL);
 }
 
+int pages; 
+uchar navData[1250][40];  // should be 125 + TOW timestamp advancing ??
+
 uchar line[4096];
 DWORD bytesRead;
 
 int main() {
-  openSerial("COM6", 57600);
+  openSerial("COM5", 57600);
 
   time_t rtime; time(&rtime);
   time_t gpsSecs = rtime - 315964800; //  Jan 6, 1980 timestamp Epoch
@@ -709,20 +714,33 @@ int main() {
     ReadFile(hCom, line, sizeof(line), &bytesRead, NULL);
     if (bytesRead) {
       for (DWORD i = 0; i < bytesRead; ++i) {
-        // parse for ID 08: 50 BPS data 
         if (line[i] == 0xA0 && line[i + 1] == 0xA2) { // start sequence
           int len = line[i + 2] * 256 + line[i + 3];  // payload
           if (line[i + 4] == 8) {  // 50 PBS (every 6 sec) 
-            for (DWORD p = i + 4; p < i + 4 + len; ++p)
-              printf("%02X", line[p]);
-            printf("\n");
+            // check if seen
+            bool seen = false;
+            for (int j = 0; j < pages; ++j)
+              if (!memcmp(line + i + 4 + 3 + 8, navData[j]+8, 40 - 8 - 4)) {  // ignore TLM, HOW, parity
+                seen = true;
+                break;
+              }
+            if (seen) continue;
+            memcpy(navData[pages++], line + i + 4 + 3, 40);
 
-            fwrite(line + 4 + 2, 1, len - 2, bps);
+            for (DWORD p = i + 4 + 3; p < i + 4 + len; ++p) {
+              printf("%02X", line[p]);
+              if ((p - i) % 4 == 2) printf(" ");
+            }
+            if (pages >= 1250) break;
+            printf("\n%d\r", pages);
+
+            fwrite(line + i + 4 + 3, 1, len - 3, bps);  // just 40 bytes of data
           }
           i += 4 + len + 4 - 1; // skip packet
         }
       }
     }
+    if (pages >= 1250) break;
   }
   fclose(bps);
 }
