@@ -74,6 +74,17 @@ HANDLE openSerial(const char* portName, int baudRate = 4800) {
   return hCom;
 }
 
+int rxRdy(void) {
+  COMSTAT cs;
+  DWORD commErrors;
+  if (!ClearCommError(hCom, &commErrors, &cs)) return -1;
+  if (commErrors)
+    printf("\n\rCommErr %X\n", commErrors); // 8 = framing (wrong baud rate); 2 = overrurn; 1 = overflow
+  return cs.cbInQue;
+}
+
+
+
 void setComm(int baudRate, bool dtrEnable = true, bool rtsEnable = true) {
   dcb.BaudRate = baudRate;
   dcb.fDtrControl = dtrEnable ? DTR_CONTROL_ENABLE : DTR_CONTROL_DISABLE;
@@ -128,10 +139,8 @@ typedef struct {
 
 typedef struct {
   // Big endian
-  struct {
-    uchar svID : 6;
-    uchar dataID : 2;   // 1  see pg. 113
-  } w3msb;
+  uchar svID : 6;     // see pg 224 ??
+  uchar dataID : 2;   // 1  see pg. 113
   unsigned short eccentric;  // -21      Eccentricity
 
   // scale (2^N LSB)
@@ -168,37 +177,33 @@ typedef  struct {
 
 
 typedef struct {
-  struct {
-    uchar svID : 6;
-    uchar dataID : 2;   // 1  see pg. 113
-  } w3msb;
+  uchar svID : 6;
+  uchar dataID : 2;   // 1  see pg. 113
   
   uchar toa;
   uchar week;
 
-  svHealth6w svHealth6[5]; // for SV1..24  - copy svHealth or 0
+  svHealth6w svHealth6[6]; // for SV1..24  - copy svHealth or 0
 
   int24 rsvrd; // LS t : 2;  // parity
 } alm5p25t;
 
 
 typedef struct {
+  uchar svHealth1 : 4;  // 9
   uchar svHealth0 : 4;  // 9
-  uchar svHealth1 : 4;
 } svHealth4b;
 
 
 typedef struct {
-  struct {
-    uchar svID : 6;
-    uchar dataID : 2;   // 1 : see pg. 113
-  } w3msb;  
+  uchar svID : 6;
+  uchar dataID : 2;   // 1 : see pg. 113
  
   svHealth4b svHealth4[16];
-  uchar resvd : 2;
   uchar svHealth25 : 6;
+  uchar resrvd     : 2;
 
-  svHealth6w svHealth26[2];  // last field reserved
+  svHealth6w svHealth26[2];  // last field reserved 
 } alm4p25t;
 
 
@@ -210,7 +215,7 @@ static union {
 
 
 // fields in .alm file order:
-void* const pField[12] = { &alm.w3msb, &alm.svHealth, &alm.eccentric, &alm.toa,
+void* const pField[12] = { &alm, &alm.svHealth, &alm.eccentric, &alm.toa,
                            &alm.deltaI, &alm.OmegaDot, &alm.rootA, &alm.Omega0,
                            &alm.omega, &alm.M0, &alm.af0msb, &alm.af1msb };
 const int scale[12] = { 0,  0, -21, 12,  -19, -38, -11, -23,  -23, -23, -20, -38 }; // scale LSB
@@ -225,9 +230,9 @@ void setField(int field, char* line) {
   }
 
   switch (width[field]) {
-    case  6: alm.w3msb.svID = atoi(line + 27); 
+    case  6: alm.svID = atoi(line + 27); 
       // fall thru to set dataID
-    case  2: alm.w3msb.dataID = 1;
+    case  2: alm.dataID = 1;
       return;
   }
 
@@ -247,7 +252,7 @@ void setField(int field, char* line) {
   val /= pow(2, scale[field]);  // scale  LSB 
 
   if (val >= pow(2, width[field]) || val < -pow(2, width[field] - 1)) {  // check fit in width
-    printf("In %s field %d of svID %d: %.0f won't fit\n", line, field, alm.w3msb.svID, val);
+    printf("In %s field %d of svID %d: %.0f won't fit\n", line, field, alm.svID, val);
     exit(-6);
   }
 
@@ -274,14 +279,16 @@ void setField(int field, char* line) {
 // https://celestrak.com/GPS/almanac/Yuma/2022/
 // https://gps.afspc.af.mil/gps/archive/2022/almanacs/yuma/
 
-void almanacPage(almData almd);
+void almanacPage(almData& almd, bool setPage = true);
 
 int convertAlmanac() {  // returns GPS week 
-  const char almPath[] = "../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0148.319488.txt";
+  // const char almPath[] = "../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0148.319488.txt";
+  const char almPath[] = "../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0860.1996.txt";
+
   printf("Almanac %s\n   Sat\r", strrchr(almPath, '/') + 1);
   FILE* almf = fopen(almPath, "rt");
   if (!almf) exit(-5);
-  alm.w3msb.dataID = 1;   // TODO: see pg. 113
+  alm.dataID = 1;   // TODO: see pg. 113
   int week;
   while (1) {
     char line[128];
@@ -300,10 +307,17 @@ int convertAlmanac() {  // returns GPS week
     fgets(line, sizeof(line), almf);  // skip blank line
 
     almanacPage(alm);
+
+#if 1 // svID 28 data currently missing
+    if (alm.svID == 27) {
+      alm.svID = 28;
+      // alm.toa = 0x90; // old
+      alm.svHealth = 0xFF;  // bad? -- not in Sirf data!
+      almanacPage(alm);
+    }
+#endif
   }
   fclose(almf);
-  printf("\n for week %d\n", week);
-
   return week;
 }
 
@@ -318,12 +332,13 @@ uchar response[304];  // longest is Cj 294
 
 bool motoCmd(const void* cmd, int len, int responseLen = -1, void* pResponse = response) {
   while (1) {
+    uchar send[256] = "@@";   // longest message 171 bytes
+
     if (cmd) {
       uchar sum = 0;
       for (int p = 0; p < len; ++p)
         sum ^= ((char*)cmd)[p]; // XOR of message bytes after @@ and before checksum
 
-      uchar send[256] = "@@";   // longest message 171 bytes
       memcpy(send + 2, cmd, len);
       send[2 + len] = sum;  // checksum
       memcpy(send + 2 + len + 1, "\r\n", 2); // CRLF
@@ -344,6 +359,18 @@ bool motoCmd(const void* cmd, int len, int responseLen = -1, void* pResponse = r
       Sleep(5000);
       continue;
     }
+
+#if 1
+    if (send[2] == 'C' && send[3] == 'b') {  // almanac input data
+      int wordPos = 0;
+      for (int i = 0; i < 2 + len + 3; ++i) {
+        printf("%02X", send[i]);
+        if (!(++wordPos % 3) && wordPos != 3 || wordPos == 4) 
+          printf(" ");
+      }
+      printf("\n");
+    }
+#endif
 
     if (*(char*)pResponse == '@'
     && ((char*)pResponse)[bytesRead - 1] == '\n') 
@@ -422,7 +449,7 @@ struct {
 
 
 void setSubframeAndPage(void) {
-  int id = alm.w3msb.svID;
+  int id = alm.svID;
   almMsg.subframe = id < 25 ? 5 : 4;  // 24 in subframe 5, 8 in subframe 4  pgs 2..5  7..10
   int page = id;
   if (page >= 25) {
@@ -432,58 +459,45 @@ void setSubframeAndPage(void) {
   }
   almMsg.page = page;
 
-#if 1
-  printf("\r%2d", id);
-#else
-  uchar* p = (uchar*)&almMsg + 4;
-  int wordPos = 0;
-  for (int i = 4; i < sizeof almMsg; ++i) {
-    printf("%02X", *p++);
-    if (!(++wordPos % 3)) printf(" ");
-  }
-  printf("\n");
-
-#endif
+  printf("\r%2d\r", id);
 }
 
-void almanacPage(almData almd) {
+void almanacPage(almData& almd, bool setPage) {
   almMsg.data = almd;
-  setSubframeAndPage();
+  if (setPage) 
+    setSubframeAndPage();
   motoCmd(&almMsg, sizeof(almMsg), 9);
 }
 
 void sendAlmanac() {
   int week = convertAlmanac();
+  uchar toa = almMsg.data.toa;  // same as others
 
-#if 1
-  // svID 28 data currently missing ??
-  almMsg.data.w3msb.svID = 28;
-  almMsg.data.toa = 0x90; // why?
-  almMsg.data.svHealth = 0xFF;  // bad? -- not in Sirf data!
-  setSubframeAndPage();
-  motoCmd(&almMsg, sizeof(almMsg), 9);
-#endif
-
-#if 1
   // TODO: copy health from svHealth ( 0 = OK )
   // svConfig codes 0 = no info
 
-  uchar toa = almMsg.data.toa;  // ?? same ??
-
   almMsg.subframe = 5; // p 83
-  alm5p25.toa = toa; // ?? scale ??, offset TODO
-  alm5p25.week = week & 0xFF; // ??
+  almMsg.page = 25;
+  alm5p25.svID = 115 & 0x3F;   // see pg. 224
+  alm5p25.toa = toa; // same as all other pages
+  alm5p25.week = week & 0xFF;
   memset(alm5p25.svHealth6, 0, sizeof alm5p25.svHealth6);
-  motoCmd(&almMsg, sizeof(almMsg), 9);
+  alm5p25.rsvrd = { 0, 0, 0 };
+  almanacPage(alm, false);
 
   almMsg.subframe = 4; // p 87
-  almMsg.page = 25;
-  for (int i = 0; i < 16; ++i) {
-    alm4p25.svHealth4[i].svHealth0 = 9;
-    alm4p25.svHealth4[i].svHealth1 = 9;
-  }
-  motoCmd(&almMsg, sizeof(almMsg), 9);
-#endif
+  alm5p25.svID = 127 & 0x3F;   // see pg. 224
+  for (int i = 0; i < 16; ++i) 
+    alm4p25.svHealth4[i].svHealth0 = alm4p25.svHealth4[i].svHealth1 = 9;
+
+  alm4p25.svHealth4[13].svHealth1 = 0;  // SV28
+  alm4p25.svHealth25 = 0;
+  alm4p25.svHealth26[0] = { 0, 0 };
+  alm4p25.svHealth26[1] = { 0, 0x3F }; // 28 missing  - byte - swapped
+  alm4p25.resrvd = 0;
+  almanacPage(alm, false);
+
+  printf("\n for week %d\n", week);
 
   // see also p 117, 120, 226
 }
@@ -586,7 +600,7 @@ int main() {
   printf("GMT date: %d/%d/%d\n", response[4], response[5], year);
 
   char almStatus[23];
-  motoCmd("Bd\000", 3, sizeof(almStatus), almStatus);
+  motoCmd("Bd\000", 3, sizeof almStatus, almStatus);
   if (almStatus[4]) { // save alamanc
     printf("Saving almanac ...");
     motoCmd("Be\000", 3, sizeof(almanac), almanac); // request almanac data    
@@ -598,11 +612,21 @@ int main() {
   else if (1) {
     motoCmd("Cf", 2, 7); // factory defaults    returns Cg0 -- why?
     sendAlmanac();
-    Sleep(1000);  // process almanac
-    motoCmd("Bd\000", 3, sizeof(almStatus), almStatus);
-    printf("Almanac %s\n", almStatus[4] ? "OK" : "bad!");
-  }
 
+    Sleep(100);
+    if (!rxRdy()) {
+      printf("No Bd response to almanac data!\n");
+      motoCmd("Bd\000", 3, sizeof almStatus, almStatus);
+    } else {
+      ReadFile(hCom, almStatus, sizeof almStatus, &bytesRead, NULL);
+      Sleep(100);
+      if (rxRdy()) {
+        printf("Second Bd response to almanac\n");
+        ReadFile(hCom, almStatus, sizeof almStatus, &bytesRead, NULL);
+      }
+    }
+    printf("Almanac %s\n", almStatus[4] == 1 ? "OK" : "bad!");
+  }
 
   motoCmd("AB\004", 3); // set Application type static 
 
@@ -679,9 +703,14 @@ int main() {
 }
 
 
+
+
+
+
+
 #else // Sirf  GPS-500, VK16E
 
-void almanacPage(almData almd) {};
+void almanacPage(almData almd, bool setPage) {};
 
 // Initialize Data Source – Message ID 128
 
