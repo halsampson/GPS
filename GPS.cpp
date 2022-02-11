@@ -126,25 +126,14 @@ typedef struct {
 } int24;
 
 
-// TODO: check byte order of words, within words (Motorola typically Big endian in memory, same as satellite)
-// left on IS-GPS-200M charts = LSB?
-// MSB arrow?
-
-// see also Sirf 3-22 order
-
 typedef struct {
   // Big endian
   struct {
     uchar svID : 6;
-    uchar dataID : 2;   // TODO: see pg. 113
+    uchar dataID : 2;   // 1  see pg. 113
   } w3msb;
-  union {
-    unsigned short eccentric;  // -21      Eccentricity
-    struct {
-      uchar toa;
-      uchar week;
-    } page25;
-  };
+  unsigned short eccentric;  // -21      Eccentricity
+
   // scale (2^N LSB)
   uchar toa;        //  12      Time of Applicability (seconds)
   short deltaI;     // -19      - i0 = 0.3 semi-circles; Inclination Angle at Reference Time
@@ -161,13 +150,63 @@ typedef struct {
     char af0msb;    // -20      SV Clock Bias Correction Coefficient
     char af1msb;    // -38      SV Clock Bias Correction Coefficient
 
-    char t : 2;  /// parity
+    char t : 2;  //  parity
     char af0lsb : 3;
     char af1lsb : 3;
   };
 } almData;
 
-almData alm;
+
+typedef  struct {
+  uchar svh0 : 6;
+  uchar svh1ms : 2;
+  uchar svh1ls : 4;
+  uchar svh2ms : 4;
+  uchar svhls : 2;
+  uchar svh3 : 6;
+} svHealth6w;
+
+
+typedef struct {
+  struct {
+    uchar svID : 6;
+    uchar dataID : 2;   // 1  see pg. 113
+  } w3msb;
+  
+  uchar toa;
+  uchar week;
+
+  svHealth6w svHealth6[5]; // for SV1..24  - copy svHealth or 0
+
+  int24 rsvrd; // LS t : 2;  // parity
+} alm5p25t;
+
+
+typedef struct {
+  uchar svHealth0 : 4;  // 9
+  uchar svHealth1 : 4;
+} svHealth4b;
+
+
+typedef struct {
+  struct {
+    uchar svID : 6;
+    uchar dataID : 2;   // 1 : see pg. 113
+  } w3msb;  
+ 
+  svHealth4b svHealth4[16];
+  uchar resvd : 2;
+  uchar svHealth25 : 6;
+
+  svHealth6w svHealth26[2];  // last field reserved
+} alm4p25t;
+
+
+static union {
+  almData  alm;
+  alm5p25t alm5p25;
+  alm4p25t alm4p25;
+};
 
 
 // fields in .alm file order:
@@ -186,8 +225,10 @@ void setField(int field, char* line) {
   }
 
   switch (width[field]) {
-  case  2: alm.w3msb.dataID = atoi(line + 27); return;  // never
-  case  6: alm.w3msb.svID = atoi(line + 27);  return;
+    case  6: alm.w3msb.svID = atoi(line + 27); 
+      // fall thru to set dataID
+    case  2: alm.w3msb.dataID = 1;
+      return;
   }
 
   double val = atof(line + 27);
@@ -414,34 +455,44 @@ void almanacPage(almData almd) {
 void sendAlmanac() {
   int week = convertAlmanac();
 
+#if 1
   // svID 28 data currently missing ??
   almMsg.data.w3msb.svID = 28;
   almMsg.data.toa = 0x90; // why?
   almMsg.data.svHealth = 0xFF;  // bad? -- not in Sirf data!
   setSubframeAndPage();
   motoCmd(&almMsg, sizeof(almMsg), 9);
+#endif
 
 #if 1
-  // TODO: health from svHealth ( 0 = OK )
+  // TODO: copy health from svHealth ( 0 = OK )
   // svConfig codes 0 = no info
-  uchar toa = almMsg.data.toa;
-  almMsg.subframe = 4; // p 87
-  almMsg.page = 25;
-  memset(&almMsg.data.eccentric, 0, sizeof(almData) - 1); 
-  // TODO: mark 28 bad
-  motoCmd(&almMsg, sizeof(almMsg), 9);
+
+  uchar toa = almMsg.data.toa;  // ?? same ??
 
   almMsg.subframe = 5; // p 83
-  almMsg.data.page25.toa = toa; // ?? scale ??, offset TODO
-  almMsg.data.page25.week = week & 0xFF; 
-  // TODO: mark 28 bad
+  alm5p25.toa = toa; // ?? scale ??, offset TODO
+  alm5p25.week = week & 0xFF; // ??
+  memset(alm5p25.svHealth6, 0, sizeof alm5p25.svHealth6);
+  motoCmd(&almMsg, sizeof(almMsg), 9);
+
+  almMsg.subframe = 4; // p 87
+  almMsg.page = 25;
+  for (int i = 0; i < 16; ++i) {
+    alm4p25.svHealth4[i].svHealth0 = 9;
+    alm4p25.svHealth4[i].svHealth1 = 9;
+  }
   motoCmd(&almMsg, sizeof(almMsg), 9);
 #endif
 
   // see also p 117, 120, 226
 }
+#if NUM_CHANNELS >= 8
+  uchar cmd_En[] = { 'E', 'n', 0, 1, 0, 10, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // PPS on when lock to any satellite; TRAIM if possible
+#else
+  uchar cmd_En[] = { 'B', 'n', 0, 1, 0, 10, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // PPS on when lock to any satellite; TRAIM if possible
+#endif
 
-uchar cmd_En[] = { 'E', 'n', 0, 1, 0, 10, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // PPS on when lock to any satellite; TRAIM if possible
 
 struct {   // otaapnnnmdyyhmspysreen sffffsffffsffffsffffsffffsffffsffffsffff
   char cmd[4];  // @@En
@@ -487,6 +538,8 @@ int main() {
 
   setResponseMs(10000);  // ??
 
+  motoCmd(NUM_CHANNELS == 6 ? "Ba\000" : "Ea\000", 3, NUM_CHANNELS == 6 ? 68 : 76); // poll mode
+
   motoCmd("Cg\000", 3); // position fix off
   motoCmd("Ab\000\000\000", 5);  // set GMT offset
   motoCmd("Aw\000", 3);  // GPS time
@@ -494,27 +547,7 @@ int main() {
 
   motoCmd("Cj", 2, 294);
   printf("%s\n", response + 4); // ID
-
-  motoCmd(NUM_CHANNELS == 6 ? "Ba\000" : "Ea\000", 3, NUM_CHANNELS == 6 ? 68 : 76); // poll mode
-
-  char almStatus[23];
-  motoCmd("Bd\000", 3, sizeof(almStatus), almStatus);
-  if (almStatus[4]) { // save alamanc
-    printf("Saving almanac ...");
-    motoCmd("Be\000", 3, sizeof(almanac), almanac); // request almanac data    
-    FILE* alm = fopen("Moto.alm", "wb");
-    fwrite(almanac, 1, bytesRead, alm);
-    fclose(alm);
-    printf("\n");
-  } else if (0) {
-    motoCmd("Cf", 2, 7); // factory defaults    returns Cg0 -- why?
-
-    sendAlmanac();
-    Sleep(1000);  // process almanac
-    motoCmd("Bd\000", 3, sizeof(almStatus), almStatus);
-    printf("Almanac %s\n", almStatus[4] ? "OK" : "bad!");
-  }
-
+ 
   // ReadFile(hCom, response, sizeof(response), &bytesRead, NULL);  // flush
 
   if (1) { // ignored if already fixing position
@@ -552,11 +585,33 @@ int main() {
   int year = response[6] * 256 + response[7];
   printf("GMT date: %d/%d/%d\n", response[4], response[5], year);
 
-  motoCmd("AB\004", 3); // set Application type static 
-  motoCmd("Cg\001", 3); // position fix mode (for VP units)
+  char almStatus[23];
+  motoCmd("Bd\000", 3, sizeof(almStatus), almStatus);
+  if (almStatus[4]) { // save alamanc
+    printf("Saving almanac ...");
+    motoCmd("Be\000", 3, sizeof(almanac), almanac); // request almanac data    
+    FILE* alm = fopen("Moto.alm", "wb");
+    fwrite(almanac, 1, bytesRead, alm);
+    fclose(alm);
+    printf("\n");
+  }
+  else if (1) {
+    motoCmd("Cf", 2, 7); // factory defaults    returns Cg0 -- why?
+    sendAlmanac();
+    Sleep(1000);  // process almanac
+    motoCmd("Bd\000", 3, sizeof(almStatus), almStatus);
+    printf("Almanac %s\n", almStatus[4] ? "OK" : "bad!");
+  }
 
-  motoCmd(cmd_En, sizeof cmd_En, NUM_CHANNELS >= 8 ? sizeof En_status : 0);  // enable 1 PPS
+
+  motoCmd("AB\004", 3); // set Application type static 
+
+  motoCmd(cmd_En, sizeof cmd_En, sizeof En_status);  // enable 1 PPS
   // printf(" %d %d %d %d", En_status.pulseStatus, En_status.solnStatus, En_status.RAIM_Status, En_status.negSawtooth);
+
+  Sleep(100);
+
+  motoCmd("Cg\001", 3); // position fix mode (for VP units)
 
 #if 0
   motoCmd("Ah\001", 3);  // manual satellite selection  
