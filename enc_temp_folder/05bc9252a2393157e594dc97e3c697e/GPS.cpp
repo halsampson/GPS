@@ -8,7 +8,8 @@
 
 // Motorola Oncore and Sirf GPS experiments
 
-// TODO: health for missing SVs
+// TODO: almanac svHealth to pg 25 fields
+// TODO: t field parity?
 
 // #define Sirf  // comment out for Moto Oncore
 

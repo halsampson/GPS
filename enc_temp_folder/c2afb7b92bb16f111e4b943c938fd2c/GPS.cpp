@@ -8,7 +8,8 @@
 
 // Motorola Oncore and Sirf GPS experiments
 
-// TODO: health for missing SVs
+// TODO: almanac svHealth to pg 25 fields
+// TODO: t field parity?
 
 // #define Sirf  // comment out for Moto Oncore
 
@@ -493,7 +494,7 @@ void almanacPage(almData& almd) {
     }    
   } else if (id == 25) {
     alm4p25.svHealth25 = health6b;
-  } else if (id <= 32)  {
+  } else {
     int index = (id - 26) / 4;
     switch (id % 4) {
     case 2: alm4p25.svHealth26[index].svh0 = health6b; break;
@@ -507,13 +508,11 @@ void almanacPage(almData& almd) {
     }
   }
 
-  if (id <= 32) {
-    uchar health4b = almd.svHealth ? 0 : 9; // TODO 1, ...
-    int index = (almd.svID - 1) / 2;
-    if (almd.svID & 1)
-      alm4p25.svHealth4[index].svHealth0 = health4b;
-    else alm4p25.svHealth4[index].svHealth1 = health4b;
-  }
+  uchar health4b = almd.svHealth ? 0 : 9; // TODO 1, ...
+  int index = (almd.svID - 1) / 2;
+  if (almd.svID & 1)
+    alm4p25.svHealth4[index].svHealth0 = health4b;
+  else alm4p25.svHealth4[index].svHealth1 = health4b;
 
   motoCmd(&almMsg, sizeof(almMsg), 9);
 }
