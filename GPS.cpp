@@ -769,9 +769,27 @@ void updateAlmanac() {
 
 void setPosition() { // ignored if already fixing position
   // set approx position
-  const int latitude = (int)(37.3392573 * 3600000);  // in milli arc seconds, Big endian
+  const int latitude =    (int)(37.3392573 * 3600000);  // in milli arc seconds, Big endian
   const int longitude = (int)(-122.0496515 * 3600000);
   const int height = 80 * 100;  // in cm
+
+  motoCmd("At\000", 3); //position hold off to set position
+  motoCmd("Av\000", 3);
+
+  struct {
+    char cmdA;
+    char cmd;
+    int  lati;
+    int  longi;
+    int  height;
+    char MSL;
+  } posHoldCmd = { 'A', 's'};
+
+  posHoldCmd.lati = _byteswap_ulong(latitude);
+  posHoldCmd.longi = _byteswap_ulong(longitude);
+  posHoldCmd.height = _byteswap_ulong(height);
+  posHoldCmd.MSL = 1;
+  motoCmd(&posHoldCmd, sizeof posHoldCmd);
 
   struct {
     char cmdA;
@@ -780,12 +798,20 @@ void setPosition() { // ignored if already fixing position
     char MSL;
   } posCmd = { 'A', 'd', 0, 1 };
 
-  posCmd.val = _byteswap_ulong(latitude);
-  motoCmd(&posCmd, 6);
+  posCmd.cmd = 'u';  // altitude hold
+  posCmd.val = _byteswap_ulong(height);
+  motoCmd(&posCmd, sizeof posCmd);
 
   posCmd.cmd = 'f';
-  posCmd.val = _byteswap_ulong(height);
-  motoCmd(&posCmd, 7, 15);    // slow reponse
+  motoCmd(&posCmd, sizeof posCmd, 15);    // slow response
+
+  posCmd.cmd = 'd';
+  posCmd.val = _byteswap_ulong(latitude);
+  motoCmd(&posCmd, sizeof posCmd - 1);
+
+  posCmd.cmd = 'e';
+  posCmd.val = _byteswap_ulong(longitude);
+  motoCmd(&posCmd, sizeof posCmd - 1);
 }
 
 void setTime() {  // set date / time
