@@ -167,12 +167,14 @@ typedef struct {
 
 
 typedef  struct {
-  uchar svh0 : 6;
   uchar svh1ms : 2;
+  uchar svh0 : 6;
+
+  uchar svh2ms : 4;   // 28
   uchar svh1ls : 4;
-  uchar svh2ms : 4;
-  uchar svhls : 2;
+
   uchar svh3 : 6;
+  uchar svh2ls : 2;   // 28
 } svHealth6w;
 
 
@@ -252,7 +254,7 @@ void setField(int field, char* line) {
 
   val /= pow(2, scale[field]);  // scale  LSB 
 
-  if (val >= pow(2, width[field]) || val < -pow(2, width[field] - 1)) {  // check fit in width
+  if (val >= pow(2, width[field]) || val < -pow(2, width[field])/2) {  // check fit in width
     printf("In %s field %d of svID %d: %.0f won't fit\n", line, field, alm.svID, val);
     exit(-6);
   }
@@ -283,8 +285,8 @@ void setField(int field, char* line) {
 void almanacPage(almData& almd);
 
 int convertAlmanac() {  // returns GPS week 
-  // const char almPath[] = "../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0148.319488.txt";
-  const char almPath[] = "../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0860.1996.txt";
+  const char almPath[] = "../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0148.319488.txt";
+  // const char almPath[] = "../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0860.1996.txt";
 
   printf("Almanac %s\n   Sat\r", strrchr(almPath, '/') + 1);
   FILE* almf = fopen(almPath, "rt");
@@ -313,7 +315,7 @@ int convertAlmanac() {  // returns GPS week
     if (alm.svID == 27) {
       alm.svID = 28;
       // alm.toa = 0x90; // old
-      alm.svHealth = 0xFF;  // bad? -- not in Sirf data!
+      alm.svHealth = 0xFF;  // bad? -- not in Sirf data -- check 1996 Moto
       almanacPage(alm);
     }
 #endif
@@ -472,34 +474,14 @@ void setSubframeAndPage(void) {
 void almanacPage(almData& almd) {
   almMsg.data = almd;
   setSubframeAndPage();
+
+  if (almd.svHealth == 0xFF)
+    almd.svID = 0x3A; // mark bad - coding from svHealth for missing satellite data ???   TODO *************
+
   motoCmd(&almMsg, sizeof(almMsg), 9);
 }
 
-#if 1
-void sendAlmanac() {
-  FILE* bps = fopen("../../../Desktop/Tools/Modules/GPS/sirf.bps.45.bin", "rb");
-  while (!feof(bps)) {
-    unsigned int r50bps[10];
-    if (fread(r50bps, 1, sizeof r50bps, bps) < sizeof r50bps) break;
-    for (int w = 0; w < 8; ++w) {
-      unsigned int le = (_byteswap_ulong((unsigned long)r50bps[w + 2]) >> 6) & 0xFFFFFF; // remove parity
-      unsigned int be = _byteswap_ulong(le);
-      memcpy(word[w], (uchar*)&be + 1, 3);
-    }
-    almanacPage(alm);
-
-#if 1
-    if (alm.svID == 27) {
-      ++alm.svID;
-      almanacPage(alm);
-    }
-#endif
-
-  }
-  fclose(bps);
-}
-
-#else
+#if 0
 
 void sendAlmanac() {
   int week = convertAlmanac();
@@ -516,13 +498,17 @@ void sendAlmanac() {
   almanacPage(alm);
 
   alm5p25.svID = 127 & 0x3F;   // see pg. 224
-  for (int i = 0; i < 16; ++i) 
-    alm4p25.svHealth4[i].svHealth0 = alm4p25.svHealth4[i].svHealth1 = 9;
+  for (int i = 0; i < 16; ++i)
+    alm4p25.svHealth4[i].svHealth0 = alm4p25.svHealth4[i].svHealth1 = 9; // should copy from svHealth 8 bits mapped *****
+  alm4p25.svHealth4[13].svHealth1 = 0;  // SV28 missing
 
-  alm4p25.svHealth4[13].svHealth1 = 0;  // SV28
   alm4p25.svHealth25 = 0;
-  alm4p25.svHealth26[0] = { 0, 0 };
-  alm4p25.svHealth26[1] = { 0, 0x3F }; // 28 missing  - byte - swapped
+  alm4p25.svHealth26[0] = { 0 };
+  alm4p25.svHealth26[1] = { 0 }; 
+
+  alm4p25.svHealth26[0].svh2ms = 0xF; // 28 missing
+  alm4p25.svHealth26[0].svh2ls = 3;
+
   alm4p25.resrvd = 0;
   almanacPage(alm);
 
@@ -530,7 +516,47 @@ void sendAlmanac() {
 
   // see also p 117, 120, 226
 }
+
+#elif 0
+
+void sendAlmanac() {
+  FILE* bps = fopen("../../../Desktop/Tools/Modules/GPS/sirf.bps.45.bin", "rb");
+  while (!feof(bps)) {
+    unsigned int r50bps[10];
+    if (fread(r50bps, 1, sizeof r50bps, bps) < sizeof r50bps) break;
+    for (int w = 0; w < 8; ++w) {
+      unsigned int le = (_byteswap_ulong((unsigned long)r50bps[w + 2]) >> 6) & 0xFFFFFF; // remove parity
+      unsigned int be = _byteswap_ulong(le);
+      memcpy(word[w], (uchar*)&be + 1, 3);
+    }
+    bool missing = alm.svID == 27;
+    almanacPage(alm);
+
+#if 1
+    if (missing) {
+      alm.svID = 28;
+      alm.svHealth = 0xFF;
+      almanacPage(alm);
+    }
 #endif
+
+  }
+  fclose(bps);
+}
+
+#else
+
+void sendAlmanac() {
+  FILE* almf = fopen("../../../Desktop/Tools/Modules/GPS/Moto.6ch.0860.1996.alm.bin", "rb");
+  while (!feof(almf)) {
+    char cbMsg[2 + sizeof almMsg + 3];
+    if (fread(&cbMsg, 1, sizeof cbMsg, almf) < sizeof cbMsg) break;
+    motoCmd(cbMsg + 2, sizeof almMsg, 9);    
+  }
+  fclose(almf);
+}
+#endif
+
 
 #if NUM_CHANNELS >= 8
   uchar cmd_En[] = { 'E', 'n', 0, 1, 0, 10, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // PPS on when lock to any satellite; TRAIM if possible
@@ -565,10 +591,48 @@ struct {   // otaapnnnmdyyhmspysreen sffffsffffsffffsffffsffffsffffsffffsffff
 uchar almanac[34*33];
 
 
+void weekRollovers() {
+  const int extraSecs = 1;
+  char cmd[16];
+
+#if 0
+  sprintf(cmd, "Ac%c%c%c%c", 8, 21, 1999 / 256, 1999 % 256);
+  motoCmd(cmd, 6);
+
+  sprintf(cmd, "Aa%c%c%c", 23, 59, 59 - extraSecs);
+  motoCmd(cmd, 5);
+
+  motoCmd("Cg\001", 3); // out of idle: required for clock to advance
+
+  Sleep(extraSecs * 1000);
+
+  motoCmd("Ac\377\377\377\377", 6);  // check date
+  printf("GMT date: %d/%d/%d\n", response[4], response[5], response[6] * 256 + response[7]);
+#endif
+
+  sprintf(cmd, "Ac%c%c%c%c", 4, 6, 2019 / 256, 2019 % 256);
+  motoCmd(cmd, 6);
+
+  sprintf(cmd, "Aa%c%c%c", 23, 59, 59 - extraSecs);
+  motoCmd(cmd, 5);
+
+  motoCmd("Cg\001", 3); // out of idle: required for clock to advance
+
+  Sleep(extraSecs * 1000);
+
+  motoCmd("Ac\377\377\377\377", 6);  // check date
+  printf("GMT date: %d/%d/%d\n", response[4], response[5], response[6] * 256 + response[7]);
+
+  motoCmd("Cg\000", 3); // idle
+}
+
+
 void setPosAndDate() { // ignored if already fixing position
   // set date / time
   motoCmd("Ab\000\000\000", 5);  // set GMT offset
   motoCmd("Aw\000", 3);  // GPS time
+
+  // weekRollovers();
 
   time_t rtime; time(&rtime);
   struct tm* pTime = gmtime(&rtime); pTime->tm_year += 1900;
@@ -580,8 +644,8 @@ void setPosAndDate() { // ignored if already fixing position
   motoCmd(cmd, 5);
 
   motoCmd("Ac\377\377\377\377", 6);  // check date
-  int year = response[6] * 256 + response[7];
-  printf("GMT date: %d/%d/%d\n", response[4], response[5], year);
+  printf("GMT date set: %d/%d/%d\n", response[4], response[5], response[6] * 256 + response[7]);
+
 
   // set approx position
   const int latitude = (int)(37.3392573 * 3600000);  // in milli arc seconds, Big endian
@@ -633,7 +697,7 @@ int main() {
 
   char almStatus[23];
   motoCmd("Bd\000", 3, sizeof almStatus, almStatus);
-  if (almStatus[4]) { // save alamanc
+  if (0 && almStatus[4]) { // save alamanc
     printf("Saving almanac ...");
     motoCmd("Be\000", 3, sizeof(almanac), almanac); // request almanac data    
     FILE* alm = fopen("Moto.1.alm", "wb");
@@ -643,19 +707,26 @@ int main() {
     setPosAndDate();
   } else if (1) {
     motoCmd("Cf", 2, 7); // factory defaults    returns Cg0 -- why?
+
+    motoCmd("Ac\377\377\377\377", 6);  // check date
+    printf("GMT date was: %d/%d/%d\n", response[4], response[5], response[6] * 256 + response[7]);
+
     setPosAndDate();
+
     sendAlmanac();
 
-    Sleep(100);
+    Sleep(1000);
     if (!rxRdy()) {
       printf("No Bd response to almanac data!\n");
       motoCmd("Bd\000", 3, sizeof almStatus, almStatus);
-    } else {
-      ReadFile(hCom, almStatus, sizeof almStatus, &bytesRead, NULL);  // received almanac - repsonse all 0s!!!
       printf("Almanac %s\n", almStatus[4] == 1 ? "OK" : "bad!");
-      Sleep(100);
-      if (rxRdy()) 
+    } else {
+      ReadFile(hCom, almStatus, sizeof almStatus, &bytesRead, NULL);  // received almanac - response all 0s!!!
+      printf("Almanac %s\n", almStatus[4] == 1 ? "OK" : "bad!");
+      Sleep(1000);
+      if (rxRdy())
         ReadFile(hCom, almStatus, sizeof almStatus, &bytesRead, NULL);  // stored to EEPROM
+      else printf("longer wait for alamanac to EEPROM!\n");
     }
   }
 
@@ -666,7 +737,7 @@ int main() {
 
   Sleep(100);
 
-//  motoCmd("Cg\001", 3); // position fix mode (for VP units)
+  motoCmd("Cg\001", 3); // position fix mode (for VP units)
 
 #if 0
   motoCmd("Ah\001", 3);  // manual satellite selection  
