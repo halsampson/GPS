@@ -8,8 +8,7 @@
 
 // Motorola Oncore and Sirf GPS experiments
 
-// TODO: almanac svHealth to pg 25 fields
-// TODO: t field parity?
+// TODO: health for missing SVs
 
 // #define Sirf  // comment out for Moto Oncore
 
@@ -350,8 +349,7 @@ bool motoCmd(const void* cmd, int len, int responseLen = -1, void* pResponse = r
 
     if (responseLen < 0) responseLen = 2 + len + 3;
     bool OK = ReadFile(hCom, pResponse, responseLen, &bytesRead, NULL);
-    ((char*)(pResponse))[bytesRead] = 0;
-
+    
     if (((char*)pResponse)[2] == 'Q') {  // QX after power cycle
       printf("Q");
       char restOfQ[128]; 
@@ -377,7 +375,8 @@ bool motoCmd(const void* cmd, int len, int responseLen = -1, void* pResponse = r
 
 #endif
 
-    if (*(char*)pResponse == '@'
+    if (bytesRead == responseLen
+    && *(char*)pResponse == '@'
     && ((char*)pResponse)[bytesRead - 1] == '\n') 
       return true;
 
@@ -480,6 +479,8 @@ void almanacPage(almData& almd) {
 
   uchar health6b = almd.svHealth & 0x3F;
 
+  // simpler using general bit position and width
+
   if (id < 25) {
     int index = (id - 1) / 4;
     switch (id % 4) {
@@ -534,7 +535,7 @@ void sendAlmanac() {
 
   almanacPage((almData&)alm4p25);
 
-  printf("\n for week %d\n", week);
+  printf("\r  for week %d\n", week);
 
   // see also p 117, 120, 226
 }
@@ -582,16 +583,10 @@ void sendAlmanac() {
 
 #endif
 
-
-#if NUM_CHANNELS >= 8
-  uchar cmd_En[] = { 'E', 'n', 0, 1, 0, 10, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // PPS on when lock to any satellite; TRAIM if possible
-#else
-  uchar cmd_En[] = { 'B', 'n', 0, 1, 0, 10, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // PPS on when lock to any satellite; TRAIM if possible
-#endif
-
+uchar cmd_En[] = { 'E', 'n', 0, 1, 0, 10, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // PPS on when lock to any satellite; TRAIM if possible; // Bn for 6 ch
 
 struct {   // otaapnnnmdyyhmspysreen sffffsffffsffffsffffsffffsffffsffffsffff
-  char cmd[4];  // @@En
+  char cmd[4];  // @@En or Bn
   char rate;
   char RAIM_on;
   unsigned short alarm;  // Big endian !!
@@ -651,27 +646,46 @@ void weekRollovers() {
   motoCmd("Cg\000", 3); // idle
 }
 
+void updateAlmanac() {  
+  char almStatus[23];
+  motoCmd("Bd\000", 3, sizeof almStatus, almStatus);
+  if (almStatus[4]) {  // TODO: only update if have later almanac -- check week
+    printf("Almanac from EEPROM or RAM\n");
+#if 0
+    // save alamanc
+    printf("Saving almanac ...");
+    motoCmd("Be\000", 3, sizeof almanac, almanac); // request almanac data    
+    FILE* alm = fopen("Moto.1.alm", "wb");
+    fwrite(almanac, 1, bytesRead, alm);
+    fclose(alm);
+    printf("\n");
+#endif
+  } else if (1) {
+    sendAlmanac();
 
-void setPosAndDate() { // ignored if already fixing position
-  // set date / time
-  motoCmd("Ab\000\000\000", 5);  // set GMT offset
-  motoCmd("Aw\000", 3);  // GPS time
+    Sleep(1000);
+    if (!rxRdy()) {
+      printf("No Bd response to almanac data!\n");
+      motoCmd("Bd\000", 3, sizeof almStatus, almStatus);
+      printf("Almanac %s\n", almStatus[4] == 1 ? "OK" : "bad!");
+    }
+    else {
+      ReadFile(hCom, almStatus, sizeof almStatus, &bytesRead, NULL);  // received almanac
+      printf("Almanac %s\n", almStatus[4] == 1 ? "OK" : "bad!");
 
-  // weekRollovers();
-
-  time_t rtime; time(&rtime);
-  struct tm* pTime = gmtime(&rtime); pTime->tm_year += 1900;
-  char cmd[16];
-  sprintf(cmd, "Ac%c%c%c%c", pTime->tm_mon + 1, pTime->tm_mday, pTime->tm_year / 256, pTime->tm_year % 256);
-  motoCmd(cmd, 6);
-
-  sprintf(cmd, "Aa%c%c%c", pTime->tm_hour, pTime->tm_min, pTime->tm_sec);
-  motoCmd(cmd, 5);
-
-  motoCmd("Ac\377\377\377\377", 6);  // check date
-  printf("GMT date set: %d/%d/%d\n", response[4], response[5], response[6] * 256 + response[7]);
+      printf("Saving to EEPROM ");
+      while (!rxRdy()) {
+        Sleep(200);
+        printf(".");
+      }
+      ReadFile(hCom, almStatus, sizeof almStatus, &bytesRead, NULL);  // stored to EEPROM
+      printf("\n");
+    }
+  }
+}
 
 
+void setPosition() { // ignored if already fixing position
   // set approx position
   const int latitude = (int)(37.3392573 * 3600000);  // in milli arc seconds, Big endian
   const int longitude = (int)(-122.0496515 * 3600000);
@@ -692,6 +706,27 @@ void setPosAndDate() { // ignored if already fixing position
   motoCmd(&posCmd, 7, 15);    // slow reponse
 }
 
+void setTime() {  // set date / time
+  motoCmd("Ab\000\000\000", 5);  // set GMT offset
+  motoCmd("Aw\000", 3);  // GPS time
+
+  // weekRollovers();
+
+  time_t rtime; time(&rtime);
+  struct tm* pTime = gmtime(&rtime); pTime->tm_year += 1900;
+  char cmd[16];
+  sprintf(cmd, "Ac%c%c%c%c", pTime->tm_mon + 1, pTime->tm_mday, pTime->tm_year / 256, pTime->tm_year % 256);
+  motoCmd(cmd, 6);
+
+  sprintf(cmd, "Aa%c%c%c", pTime->tm_hour, pTime->tm_min, pTime->tm_sec);
+  motoCmd(cmd, 5);
+
+  motoCmd("Cg\001", 3); // start clock, position fix mode (for VP units)
+
+  motoCmd("Ac\377\377\377\377", 6);  // check date
+  printf("GMT date set: %d/%d/%d\n", response[4], response[5], response[6] * 256 + response[7]);
+}
+
 
 int main() {
   if (sizeof(almMsg) != 33 - 5) exit(sizeof(almMsg));
@@ -708,61 +743,50 @@ int main() {
   WriteFile(hCom, NULL, 1, NULL, NULL); // to set baud rate?
   setResponseMs(1000);
   ReadFile(hCom, response, sizeof(response), &bytesRead, NULL);  // flush
+
   setResponseMs(10000); 
 
-  motoCmd(NUM_CHANNELS == 6 ? "Ba\000" : "Ea\000", 3, NUM_CHANNELS == 6 ? 68 : 76); // poll mode
-
   motoCmd("Cg\000", 3); // position fix off
+  motoCmd(NUM_CHANNELS == 6 ? "Ba\000" : "Ea\000", 3, NUM_CHANNELS == 6 ? 68 : 76); // poll mode
   motoCmd("Bb\000", 3, 92); // don't send satellites
 
+#if 0
+  motoCmd("Cf", 2, 7); // factory defaults    returns Cg0 -- why?
+  motoCmd("Ac\377\377\377\377", 6);  // check date
+  printf("GMT date was: %d/%d/%d\n", response[4], response[5], response[6] * 256 + response[7]);
+#endif
+
   motoCmd("Cj", 2, 294);
+  response[bytesRead] = 0;
   printf("%s\n", response + 4); // ID
- 
-  // ReadFile(hCom, response, sizeof(response), &bytesRead, NULL);  // flush
 
-  char almStatus[23];
-  motoCmd("Bd\000", 3, sizeof almStatus, almStatus);
-  if (0 && almStatus[4]) { // save alamanc
-    printf("Saving almanac ...");
-    motoCmd("Be\000", 3, sizeof(almanac), almanac); // request almanac data    
-    FILE* alm = fopen("Moto.1.alm", "wb");
-    fwrite(almanac, 1, bytesRead, alm);
-    fclose(alm);
-    printf("\n");
-    setPosAndDate();
-  } else if (1) {
-    motoCmd("Cf", 2, 7); // factory defaults    returns Cg0 -- why?
+  motoCmd(NUM_CHANNELS == 6 ? "Ca"  : "Fa", 2, 9);  //self test
+  if (response[4] || response[5])
+    printf("Self test fail\n");
 
-    motoCmd("Ac\377\377\377\377", 6);  // check date
-    printf("GMT date was: %d/%d/%d\n", response[4], response[5], response[6] * 256 + response[7]);
-
-    setPosAndDate();
-
-    sendAlmanac();
-
-    Sleep(1000);
-    if (!rxRdy()) {
-      printf("No Bd response to almanac data!\n");
-      motoCmd("Bd\000", 3, sizeof almStatus, almStatus);
-      printf("Almanac %s\n", almStatus[4] == 1 ? "OK" : "bad!");
-    } else {
-      ReadFile(hCom, almStatus, sizeof almStatus, &bytesRead, NULL);  // received almanac - response all 0s!!!
-      printf("Almanac %s\n", almStatus[4] == 1 ? "OK" : "bad!");
-      Sleep(1000);
-      if (rxRdy())
-        ReadFile(hCom, almStatus, sizeof almStatus, &bytesRead, NULL);  // stored to EEPROM
-      else printf("longer wait for alamanac to EEPROM!\n");
-    }
-  }
-
+  updateAlmanac();
+  setPosition();
   motoCmd("AB\004", 3); // set Application type static 
 
+  setTime();
+
+  if (NUM_CHANNELS < 8) cmd_En[0] = 'B';
   motoCmd(cmd_En, sizeof cmd_En, sizeof En_status);  // enable 1 PPS
   // printf(" %d %d %d %d", En_status.pulseStatus, En_status.solnStatus, En_status.RAIM_Status, En_status.negSawtooth);
 
-  Sleep(100);
-
-  motoCmd("Cg\001", 3); // position fix mode (for VP units)
+#if 0
+  motoCmd("Bl/001", 3, 0);
+  while (1) {
+    char broadcast[41];
+    DWORD bytesRead;
+    ReadFile(hCom, broadcast, sizeof(broadcast), &bytesRead, NULL);
+    if (bytesRead) {
+      for (int i = 0; i < sizeof(broadcast); ++i)
+        printf("%02X", broadcast[i]);
+      printf("\n");
+    }
+  }
+#endif
 
 #if 0
   motoCmd("Ah\001", 3);  // manual satellite selection  
@@ -779,20 +803,6 @@ int main() {
   }
 #endif
 
-#if 0
-  motoCmd("Bl/001", 3, 0);
-
-  while (1) {
-    char broadcast[41];
-    DWORD bytesRead;
-    ReadFile(hCom, broadcast, sizeof(broadcast), &bytesRead, NULL);
-    if (bytesRead) {
-      for (int i = 0; i < sizeof(broadcast); ++i)
-        printf("%02X", broadcast[i]);
-      printf("\n");
-    }
-  }
-#endif
 
   do {
     while (!_kbhit()) {
@@ -825,6 +835,8 @@ int main() {
       Sleep(5000); // * (32 - 8) = 24 satellites to check
     }
   } while (_getch() != 27);  // Escape
+
+  motoCmd("Cg\000", 3);  // restart in idle mode
 
   CloseHandle(hCom);
 }
