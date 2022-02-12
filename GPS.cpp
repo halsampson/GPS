@@ -11,9 +11,9 @@
 // TODO: almanac svHealth to pg 25 fields
 // TODO: t field parity?
 
-const int NUM_CHANNELS = 8;  // or 6, 12  - TODO: auto-set via model # A vs. B , ...
+#define Sirf  // comment out for Moto Oncore
 
-// #define Sirf  // comment out for Moto Oncore
+const int NUM_CHANNELS = 8;  // or 6, 12  - TODO: auto-set via model # A vs. B , ...
 
 
 // Common routines
@@ -710,7 +710,7 @@ int main() {
 
 #else // Sirf  GPS-500, VK16E
 
-void almanacPage(almData almd, bool setPage) {};
+void almanacPage(almData& almd, bool setPage) { };
 
 // Initialize Data Source – Message ID 128
 
@@ -755,8 +755,11 @@ void sirfCmd(void* cmd, int len) {
   WriteFile(hCom, post, 4, NULL, NULL);
 }
 
-int pages; 
-uchar navData[1250][40];  // should be 125 + TOW timestamp advancing ??
+const int MaxSeen = 2048;
+
+int numSeen; 
+uchar navData[MaxSeen][40];  // should be 125 + TOW timestamp advancing ??
+int seen[MaxSeen];
 
 uchar line[4096];
 DWORD bytesRead;
@@ -792,41 +795,73 @@ int main() {
 
   if (!SetCommTimeouts(hCom, &timeouts))  printf("Can't SetCommTimeouts\n");
 
-  FILE* bps = fopen("../../../Desktop/Tools/Modules/GPS/sirf.bps.bin", "wb");
-
-  while (!_kbhit()) {
+  while (1) {
     ReadFile(hCom, line, sizeof(line), &bytesRead, NULL);
     if (bytesRead) {
-      for (DWORD i = 0; i < bytesRead; ++i) {
+      for (int i = 0; i < (int)bytesRead; ++i) {
         if (line[i] == 0xA0 && line[i + 1] == 0xA2) { // start sequence
           int len = line[i + 2] * 256 + line[i + 3];  // payload
           if (line[i + 4] == 8) {  // 50 PBS (every 6 sec) 
-            // check if seen
-            bool seen = false;
-            for (int j = 0; j < pages; ++j)
-              if (!memcmp(line + i + 4 + 3 + 8, navData[j]+8, 40 - 8 - 4)) {  // ignore TLM, HOW, parity
-                seen = true;
-                break;
-              }
-            if (seen) continue;
-            memcpy(navData[pages++], line + i + 4 + 3, 40);
+            int preamble = line[i + 7] << 2 | line[i + 8] >> 6;  // word 1 MSB
+            if (preamble == 0x8B || preamble == 0x74) {  // preamble can be inverted
+              if (preamble == 0x74) // invert rest of page
+                for (int j = i + 4 + 3; j < i + 4 + len; ++j)
+                  line[j] = ~line[j];
 
-            for (DWORD p = i + 4 + 3; p < i + 4 + len; ++p) {
-              printf("%02X", line[p]);
-              if ((p - i) % 4 == 2) printf(" ");
+              // check if data seen before
+              int j;
+              for (j = 0; j < numSeen; ++j)
+                if (!memcmp(line + i + 4 + 3 + 12, navData[j] + 12, 40 - 12 - 4)) {  // ignore TLM, HOW, toa, parity
+                  ++seen[j];
+                  break;
+                }
+              if (j < numSeen) continue;
+              memcpy(navData[numSeen++], line + i + 4 + 3, 40);
             }
-            if (pages >= 1250) break;
-            printf("\n%d\r", pages);
-
-            fwrite(line + i + 4 + 3, 1, len - 3, bps);  // just 40 bytes of data
           }
           i += 4 + len + 4 - 1; // skip packet
         }
       }
     }
-    if (pages >= 1250) break;
+
+    if (numSeen >= MaxSeen || _kbhit()) { // dump data
+      FILE* bps = fopen("../../../Desktop/Tools/Modules/GPS/sirf.bps.45.bin", "wb");
+
+      // find highest seen count for each svID
+      for (int almPage = 1; almPage <= 34; ++almPage) {
+        int svID = 64 + almPage;  // DATA ID | SV ID  -- spec is confusing
+        switch (almPage) {
+          case 33: svID = 115; break; // svHealth
+          case 34: svID = 127; break;
+        }
+
+        int maxSeen = 0;
+        int bestSeen = -1;
+        for (int i = 0; i < numSeen; ++i) {
+          int ID = navData[i][8] << 2 | navData[i][9] >> 6;  // word 3 MSB
+          if (ID == svID && seen[i] >= maxSeen) {  // word 3 MSB
+            bestSeen = i;
+            maxSeen = seen[i];
+          }
+        }
+        if (bestSeen < 0) continue;
+
+        fwrite(navData[bestSeen], 1, 40, bps);
+
+        printf("%2d:%d: ", almPage, seen[bestSeen]);
+        for (DWORD p = 0; p < 40; ++p) {
+          printf("%02X", navData[bestSeen][p]);
+          if (p % 4 == 3) printf(" ");
+        }
+        printf("\n");
+      }
+      fclose(bps);
+      printf("%d\n", numSeen);
+
+      if (numSeen >= MaxSeen) break;
+      if (_getch() == 27) break;
+    }
   }
-  fclose(bps);
 }
 
 
