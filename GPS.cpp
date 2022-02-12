@@ -12,9 +12,6 @@
 
 // #define Sirf  // comment out for Moto Oncore
 
-const int NUM_CHANNELS = 8;  // or 6, 12  - TODO: auto-set via model # A vs. B , ...
-
-
 // Common routines
 
 #pragma warning(disable : 6031)
@@ -358,7 +355,7 @@ bool motoCmd(const void* cmd, int len, int responseLen = -1, void* pResponse = r
       continue;
     }
 
-#if 1
+#if 0  // print almanac hex
     if (send[2] == 'C' && send[3] == 'b') {  // almanac input data
       int wordPos = 0;
       for (int i = 0; i < 2 + len + 3; ++i) {
@@ -372,7 +369,6 @@ bool motoCmd(const void* cmd, int len, int responseLen = -1, void* pResponse = r
       fwrite(send, 1, 2 + len + 3, bin);
       fclose(bin);
     }
-
 #endif
 
     if (bytesRead == responseLen
@@ -385,10 +381,7 @@ bool motoCmd(const void* cmd, int len, int responseLen = -1, void* pResponse = r
   } 
 }
 
-struct {
-  char atat[2]; // @@
-  char cmd[2];  // Ba 6 ch; Ea 8ch;  Ha 12 ch
-
+typedef struct {
   char month;
   char day;
   uchar year[2]; // Big endian
@@ -401,48 +394,82 @@ struct {
 
   char visible;
   char tracked;
+} EaBa;
 
+typedef struct {
+  char satID;
+  uchar trackMode;
+  // 0 - Code Search 
+  // 1 - Code Acquire 
+  // 2 - AGC Set 
+  // 3 - Freq Acquire
+  // 4 - Bit Sync Detect
+  // 5 - Message Sync Detect
+  // 6 - Satellite Time Available
+  // 7 - Ephemeris Acquire
+  // 8 - Avail for Position
+  uchar SNR;
   struct {
-    char satID;
-    uchar trackMode;
-    // 0 - Code Search 
-    // 1 - Code Acquire 
-    // 2 - AGC Set 
-    // 3 - Freq Acquire
-    // 4 - Bit Sync Detect
-    // 5 - Message Sync Detect
-    // 6 - Satellite Time Available
-    // 7 - Ephemeris Acquire
-    // 8 - Avail for Position
-    uchar SNR;
+    uchar used : 1;
+    uchar momAlert : 1;
+    uchar spoof : 1;
+    uchar unhealthy : 1;
+    uchar inaccurate : 1;
+    uchar spare2 : 1;
+    uchar spare1 : 1;
+    uchar parityErr : 1;
+  } chStatus;
+} Sat;
+
+static union {
+  struct {
+    char atat[2]; // @@
+    char cmd[2];  // Ba 6 ch; Ea 8ch;  Ha 12 ch
+
+    EaBa ba;
+
+    Sat sat[6];
+
     struct {
-      uchar used : 1;
-      uchar momAlert : 1;
-      uchar spoof : 1;
-      uchar unhealthy : 1;
-      uchar inaccurate : 1;
-      uchar spare2 : 1;
-      uchar spare1 : 1;
-      uchar parityErr : 1;
-    } chStatus;
-  } sat[NUM_CHANNELS];
+      uchar posProp : 1;
+      uchar poorGeo : 1;
+      uchar fix3D : 1;
+      uchar fix2D : 1;
+      uchar acquire : 1;
+      uchar differential : 1;
+      uchar insuffVisible : 1;
+      uchar badAlmanac : 1;
+    } rcvrStatus;
+
+    uchar check;
+    char CR;
+    char LF;
+  } BaResponse;
 
   struct {
-    uchar posProp : 1;
-    uchar poorGeo : 1;
-    uchar fix3D : 1;
-    uchar fix2D : 1;
-    uchar acquire : 1;
-    uchar differential : 1;
-    uchar insuffVisible : 1;
-    uchar badAlmanac : 1;
-  } rcvrStatus;
+    char atat[2]; // @@
+    char cmd[2];  // Ba 6 ch; Ea 8ch;  Ha 12 ch
 
-  uchar check;
-  char CR;
-  char LF;
-} baMsg;
+    EaBa ea;
 
+    Sat sat[8];
+
+    struct {
+      uchar posProp : 1;
+      uchar poorGeo : 1;
+      uchar fix3D : 1;
+      uchar fix2D : 1;
+      uchar acquire : 1;
+      uchar differential : 1;
+      uchar insuffVisible : 1;
+      uchar badAlmanac : 1;
+    } rcvrStatus;
+
+    uchar check;
+    char CR;
+    char LF;
+  } EaResponse;
+};
 
 struct {
   char cmd[2];     // Cb
@@ -634,10 +661,34 @@ struct {   // otaapnnnmdyyhmspysreen sffffsffffsffffsffffsffffsffffsffffsffff
   struct {
     char svID;
     int ns;  // Big endian !!
-  } satTime[NUM_CHANNELS];
+  } satTime[6];
+  char chksum;
+  char CRLF[2];
+} Bn_status;
+
+struct {   // otaapnnnmdyyhmspysreen sffffsffffsffffsffffsffffsffffsffffsffff
+  char cmd[4];  // @@En or Bn
+  char rate;
+  char RAIM_on;
+  unsigned short alarm;  // Big endian !!
+  char PPS;
+  char PPSrate[3]; // ???
+  char nextFire[7];
+  char pulseStatus;
+  char pulseSync;
+  char solnStatus;
+  char RAIM_Status;
+  unsigned short sigma_ns;
+  char negSawtooth;
+
+  struct {
+    char svID;
+    int ns;  // Big endian !!
+  } satTime[8];
   char chksum;
   char CRLF[2];
 } En_status;
+
 
 uchar almanac[34*33];
 
@@ -760,9 +811,6 @@ void setTime() {  // set date / time
 
 
 int main() {
-  if (sizeof almMsg != 33 - 5) exit(sizeof almMsg);
-  if (sizeof En_status != 29 + NUM_CHANNELS * 5) exit(sizeof En_status);
-
 #if 1
   if (!openSerial("COM3", 9600)) exit(-1); // default on power-cycle
 #else  // switch from NMEA mode to binary
@@ -778,20 +826,23 @@ int main() {
   setResponseMs(10000); 
 
   motoCmd("Cg\000", 3); // position fix off
-  motoCmd(NUM_CHANNELS == 6 ? "Ba\000" : "Ea\000", 3, NUM_CHANNELS == 6 ? 68 : 76); // poll mode
   motoCmd("Bb\000", 3, 92); // don't send satellites
 
+  int numChannels = 8;  // or 6, 12  
+  motoCmd("Cj", 2, 294);
+  response[bytesRead] = 0;
+  printf("%s\n", response + 4); // ID
+
+  numChannels = strstr((char*)response, "8_CH") ? 8 : 6;
+  motoCmd(numChannels < 8 ? "Ba\000" : "Ea\000", 3, numChannels < 8 ? sizeof BaResponse : sizeof EaResponse); // poll mode
+  
 #if 0
   motoCmd("Cf", 2, 7); // factory defaults    returns Cg0 -- why?
   motoCmd("Ac\377\377\377\377", 6);  // check date
   printf("GMT date was: %d/%d/%d\n", response[4], response[5], response[6] * 256 + response[7]);
 #endif
 
-  motoCmd("Cj", 2, 294);
-  response[bytesRead] = 0;
-  printf("%s\n", response + 4); // ID
-
-  motoCmd(NUM_CHANNELS == 6 ? "Ca"  : "Fa", 2, 9);  //self test
+  motoCmd(numChannels == 6 ? "Ca"  : "Fa", 2, 9);  //self test
   if (response[4] || response[5])
     printf("Self test fail\n");
 
@@ -801,8 +852,10 @@ int main() {
 
   setTime();
 
-  if (NUM_CHANNELS < 8) cmd_En[0] = 'B';
-  motoCmd(cmd_En, sizeof cmd_En, sizeof En_status);  // enable 1 PPS
+  if (numChannels < 8) {
+    cmd_En[0] = 'B';
+    motoCmd(cmd_En, sizeof cmd_En, sizeof Bn_status);
+  } else motoCmd(cmd_En, sizeof cmd_En, sizeof En_status);  // enable 1 PPS
   // printf(" %d %d %d %d", En_status.pulseStatus, En_status.solnStatus, En_status.RAIM_Status, En_status.negSawtooth);
 
   printf("\n");
@@ -811,19 +864,18 @@ int main() {
 
   do {
     while (!_kbhit()) {
-      if (motoCmd(NUM_CHANNELS == 6 ? "Ba\000" : "Ea\000", 3, sizeof baMsg, &baMsg)) { // unsolicited 1/sec  (or slower with longer serial timeout)        
-      
+      if (motoCmd(numChannels < 8 ? "Ba\000" : "Ea\000", 3, numChannels < 8 ? sizeof BaResponse : sizeof EaResponse, &EaResponse)) { // unsolicited 1/sec  (or slower with longer serial timeout)              
         int worstSignal = 256;
         int worstCh, worstSV;
-        for (int s = 0; s < NUM_CHANNELS; ++s) {
-          printf("%2d:%d+%3d  ", baMsg.sat[s].satID, baMsg.sat[s].trackMode, baMsg.sat[s].SNR);
-          if (baMsg.sat[s].SNR < worstSignal) {  // no signal -> 100 ??
-            worstSignal = baMsg.sat[s].SNR;
-            worstSV = baMsg.sat[s].satID;
+        for (int s = 0; s < numChannels; ++s) {
+          printf("%2d:%d+%3d  ", EaResponse.sat[s].satID, EaResponse.sat[s].trackMode, EaResponse.sat[s].SNR);
+          if (EaResponse.sat[s].SNR < worstSignal) {  // no signal -> 100 ??
+            worstSignal = EaResponse.sat[s].SNR;
+            worstSV = EaResponse.sat[s].satID;
             worstCh = s;
           }
         }
-        printf("%X", *(uchar*)&baMsg.rcvrStatus);
+        printf("%X", numChannels < 8 ? *(uchar*)&BaResponse.rcvrStatus : *(uchar*)&EaResponse.rcvrStatus);
 
 #if 0
         // "The signal strength value is meaningless when the channel tracking mode is zero."  *****
