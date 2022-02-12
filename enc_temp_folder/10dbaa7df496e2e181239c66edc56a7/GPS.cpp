@@ -848,7 +848,7 @@ int main() {
 
         fwrite(navData[bestSeen], 1, 40, bps);
 
-        printf("%3dx%3d: ", seen[bestSeen], almPage);
+        printf("%2d:%d: ", almPage, seen[bestSeen]);
         for (int p = 2; p < 10; ++p) {
           unsigned int word = _byteswap_ulong(*(unsigned long*)&navData[bestSeen][4 * p]) >> 6 & 0xFFFFFF; // remove parity
           printf("%06X ", word);
