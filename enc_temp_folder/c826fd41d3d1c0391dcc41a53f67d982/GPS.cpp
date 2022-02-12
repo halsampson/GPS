@@ -48,14 +48,14 @@ void setResponseMs(DWORD ms) {
 
 HANDLE openSerial(const char* portName, int baudRate = 4800) {
   char portDev[16] = "\\\\.\\";
-  strcat_s(portDev, sizeof(portDev), portName);
+  strcat_s(portDev, sizeof portDev, portName);
 
   hCom = CreateFile(portDev, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL); // better OVERLAPPED
   if (hCom == INVALID_HANDLE_VALUE) return NULL;
 
   // configure far end bridge COM port - only for bridges - could check endpoint capabilites??
   dcb = { 0 };
-  dcb.DCBlength = sizeof(DCB);
+  dcb.DCBlength = sizeof DCB;
   GetCommState(hCom, &dcb);
 
   dcb.BaudRate = baudRate;
@@ -291,19 +291,19 @@ int convertAlmanac(const char* almPath) {  // returns GPS week
   int week;
   while (1) {
     char line[128];
-    if (!fgets(line, sizeof(line), almf)) break;  // skip header line - exit on end of file
+    if (!fgets(line, sizeof line, almf)) break;  // skip header line - exit on end of file
     week = atoi(line + 13);
 
     for (int i = 0; i < 12; ++i) {
-      if (!fgets(line, sizeof(line), almf)) {
+      if (!fgets(line, sizeof line, almf)) {
         printf("%s", line);
         exit(-7);
       }
       setField(i, line);
     }
 
-    fgets(line, sizeof(line), almf);  // skip week
-    fgets(line, sizeof(line), almf);  // skip blank line
+    fgets(line, sizeof line, almf);  // skip week
+    fgets(line, sizeof line, almf);  // skip blank line
 
     almanacPage(alm);
 
@@ -353,7 +353,7 @@ bool motoCmd(const void* cmd, int len, int responseLen = -1, void* pResponse = r
     if (((char*)pResponse)[2] == 'Q') {  // QX after power cycle
       printf("Q");
       char restOfQ[128]; 
-      ReadFile(hCom, restOfQ, sizeof(restOfQ), &bytesRead, NULL);  // flush, wait
+      ReadFile(hCom, restOfQ, sizeof restOfQ, &bytesRead, NULL);  // flush, wait
       Sleep(5000);
       continue;
     }
@@ -517,7 +517,7 @@ void almanacPage(almData& almd) {
     else alm4p25.svHealth4[index].svHealth1 = health4b;
   }
 
-  motoCmd(&almMsg, sizeof(almMsg), 9);
+  motoCmd(&almMsg, sizeof almMsg, 9);
 }
 
 #if 1
@@ -582,6 +582,37 @@ void sendAlmanac() {
 }
 
 #endif
+
+void selectSatellites() {
+  motoCmd("Ah\001", 3);  // manual satellite selection  
+
+  // initial Chs: 1 6 9 14 20 22 24 25
+  int onDeck[] = { 2, 3, 4, 5,  7, 8,  10, 11, 12, 13,  15, 16, 17, 18, 19,  21,  23,  26, 27, 28, 29, 30, 31, 32 };
+  int oldPtr = 0;
+
+  int bestSVs[] = { 29, 18, 20, 26,  23, 15, 13, 2,  0 };  // get from Sirf
+  for (int ch = 0; bestSVs[ch]; ++ch) {
+    char satSelect[16];
+    sprintf(satSelect, "Ai%c%c", ch + 1, bestSVs[ch]);
+    motoCmd(satSelect, 4);
+  }
+}
+
+
+void watchBroadcast() {  // no response
+  motoCmd("Bl/001", 3, 0);
+  while (1) {
+    char broadcast[41];
+    DWORD bytesRead;
+    ReadFile(hCom, broadcast, sizeof broadcast, &bytesRead, NULL);
+    if (bytesRead) {
+      for (int i = 0; i < sizeof broadcast; ++i)
+        printf("%02X", broadcast[i]);
+      printf("\n");
+    }
+  }
+}
+
 
 uchar cmd_En[] = { 'E', 'n', 0, 1, 0, 10, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // PPS on when lock to any satellite; TRAIM if possible; // Bn for 6 ch
 
@@ -729,8 +760,8 @@ void setTime() {  // set date / time
 
 
 int main() {
-  if (sizeof(almMsg) != 33 - 5) exit(sizeof(almMsg));
-  if (sizeof(En_status) != 29 + NUM_CHANNELS * 5) exit(sizeof(En_status));
+  if (sizeof almMsg != 33 - 5) exit(sizeof almMsg);
+  if (sizeof En_status != 29 + NUM_CHANNELS * 5) exit(sizeof En_status);
 
 #if 1
   if (!openSerial("COM3", 9600)) exit(-1); // default on power-cycle
@@ -742,7 +773,7 @@ int main() {
 
   WriteFile(hCom, NULL, 1, NULL, NULL); // to set baud rate?
   setResponseMs(1000);
-  ReadFile(hCom, response, sizeof(response), &bytesRead, NULL);  // flush
+  ReadFile(hCom, response, sizeof response, &bytesRead, NULL);  // flush
 
   setResponseMs(10000); 
 
@@ -774,39 +805,13 @@ int main() {
   motoCmd(cmd_En, sizeof cmd_En, sizeof En_status);  // enable 1 PPS
   // printf(" %d %d %d %d", En_status.pulseStatus, En_status.solnStatus, En_status.RAIM_Status, En_status.negSawtooth);
 
-#if 0
-  motoCmd("Bl/001", 3, 0);
-  while (1) {
-    char broadcast[41];
-    DWORD bytesRead;
-    ReadFile(hCom, broadcast, sizeof(broadcast), &bytesRead, NULL);
-    if (bytesRead) {
-      for (int i = 0; i < sizeof(broadcast); ++i)
-        printf("%02X", broadcast[i]);
-      printf("\n");
-    }
-  }
-#endif
+  printf("\n");
 
-#if 0
-  motoCmd("Ah\001", 3);  // manual satellite selection  
-
-  // initial Chs: 1 6 9 14 20 22 24 25
-  int onDeck[] = { 2, 3, 4, 5,  7, 8,  10, 11, 12, 13,  15, 16, 17, 18, 19,  21,  23,  26, 27, 28, 29, 30, 31, 32 };
-  int oldPtr = 0;
-
-  int bestSVs[] = { 29, 18, 20, 26,  23, 15, 13, 2,  0 };  // get from Sirf
-  for (int ch = 0; bestSVs[ch]; ++ch) {
-    char satSelect[16];
-    sprintf(satSelect, "Ai%c%c", ch + 1, bestSVs[ch]);
-    motoCmd(satSelect, 4);
-  }
-#endif
-
+  // watchBroadcast();  // no lock/data !!  antenna? ...
 
   do {
     while (!_kbhit()) {
-      if (motoCmd(NUM_CHANNELS == 6 ? "Ba\000" : "Ea\000", 3, sizeof(baMsg), &baMsg) && bytesRead == sizeof(baMsg)) { // unsolicited 1/sec  (or slower with longer serial timeout)        
+      if (motoCmd(NUM_CHANNELS == 6 ? "Ba\000" : "Ea\000", 3, sizeof baMsg, &baMsg)) { // unsolicited 1/sec  (or slower with longer serial timeout)        
       
         int worstSignal = 256;
         int worstCh, worstSV;
@@ -935,7 +940,7 @@ int main() {
   if (!SetCommTimeouts(hCom, &timeouts))  printf("Can't SetCommTimeouts\n");
 
   while (1) {
-    ReadFile(hCom, line, sizeof(line), &bytesRead, NULL);
+    ReadFile(hCom, line, sizeof line, &bytesRead, NULL);
     if (bytesRead) {
       for (int i = 0; i < (int)bytesRead; ++i) {
         if (line[i] == 0xA0 && line[i + 1] == 0xA2) { // start sequence
@@ -1041,7 +1046,7 @@ void nmea() {
   }
 
 
-  // ReadFile(hCom, line, sizeof(line), &bytesRead, NULL);  // flush
+  // ReadFile(hCom, line, sizeof line, &bytesRead, NULL);  // flush
 
   //  try all combinations using DTR, RTS - no help
   for (int dtr = 0; dtr <= 1; ++dtr)
@@ -1058,7 +1063,7 @@ void nmea() {
       nmeaCmd("PSRF103,05,00,05,01");
 
       while (!_kbhit()) {
-        ReadFile(hCom, line, sizeof(line), &bytesRead, NULL);
+        ReadFile(hCom, line, sizeof line, &bytesRead, NULL);
         if (bytesRead) {
           line[bytesRead] = 0;
           printf("%s\n", line);
@@ -1068,7 +1073,7 @@ void nmea() {
 
     
       while (!_kbhit()) {
-        ReadFile(hCom, line, sizeof(line), &bytesRead, NULL);
+        ReadFile(hCom, line, sizeof line, &bytesRead, NULL);
         if (bytesRead) {
           line[bytesRead] = 0;
           printf("%s\n", line);
@@ -1079,7 +1084,7 @@ void nmea() {
 
 
   while (!_kbhit()) {
-    ReadFile(hCom, line, sizeof(line), &bytesRead, NULL);
+    ReadFile(hCom, line, sizeof line, &bytesRead, NULL);
     if (bytesRead) {
       line[bytesRead] = 0;
       printf("%s\n", line);
@@ -1092,7 +1097,7 @@ void nmea() {
   // nmeaCmd("PSRF103,08,00,00,01");
 
   while (!_kbhit()) {
-    ReadFile(hCom, line, sizeof(line), &bytesRead, NULL);
+    ReadFile(hCom, line, sizeof line, &bytesRead, NULL);
     if (bytesRead) {
       line[bytesRead] = 0;
       printf("%s\n", line);
@@ -1109,7 +1114,7 @@ void nmea() {
   FILE* sirf = fopen("sirf.test.bin", "wb");
 
   while (!_kbhit()) {
-    ReadFile(hCom, line, sizeof(line), &bytesRead, NULL);
+    ReadFile(hCom, line, sizeof line, &bytesRead, NULL);
 
     for (DWORD i = 0; i < bytesRead; ++i)
       printf("%02X ", line[i]);
