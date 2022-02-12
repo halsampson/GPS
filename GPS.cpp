@@ -11,7 +11,7 @@
 // TODO: almanac svHealth to pg 25 fields
 // TODO: t field parity?
 
-#define Sirf  // comment out for Moto Oncore
+// #define Sirf  // comment out for Moto Oncore
 
 const int NUM_CHANNELS = 8;  // or 6, 12  - TODO: auto-set via model # A vs. B , ...
 
@@ -211,6 +211,7 @@ static union {
   almData  alm;
   alm5p25t alm5p25;
   alm4p25t alm4p25;
+  uchar    word[8][3];
 };
 
 
@@ -279,7 +280,7 @@ void setField(int field, char* line) {
 // https://celestrak.com/GPS/almanac/Yuma/2022/
 // https://gps.afspc.af.mil/gps/archive/2022/almanacs/yuma/
 
-void almanacPage(almData& almd, bool setPage = true);
+void almanacPage(almData& almd);
 
 int convertAlmanac() {  // returns GPS week 
   // const char almPath[] = "../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0148.319488.txt";
@@ -450,6 +451,12 @@ struct {
 
 void setSubframeAndPage(void) {
   int id = alm.svID;
+
+  switch (64 + id) {
+    case 115: almMsg.subframe = 5; almMsg.page = 25; return;
+    case 127: almMsg.subframe = 4; almMsg.page = 25; return;
+  }
+
   almMsg.subframe = id < 25 ? 5 : 4;  // 24 in subframe 5, 8 in subframe 4  pgs 2..5  7..10
   int page = id;
   if (page >= 25) {
@@ -462,12 +469,37 @@ void setSubframeAndPage(void) {
   printf("\r%2d\r", id);
 }
 
-void almanacPage(almData& almd, bool setPage) {
+void almanacPage(almData& almd) {
   almMsg.data = almd;
-  if (setPage) 
-    setSubframeAndPage();
+  setSubframeAndPage();
   motoCmd(&almMsg, sizeof(almMsg), 9);
 }
+
+#if 1
+void sendAlmanac() {
+  FILE* bps = fopen("../../../Desktop/Tools/Modules/GPS/sirf.bps.45.bin", "rb");
+  while (!feof(bps)) {
+    unsigned int r50bps[10];
+    if (fread(r50bps, 1, sizeof r50bps, bps) < sizeof r50bps) break;
+    for (int w = 0; w < 8; ++w) {
+      unsigned int le = (_byteswap_ulong((unsigned long)r50bps[w + 2]) >> 6) & 0xFFFFFF; // remove parity
+      unsigned int be = _byteswap_ulong(le);
+      memcpy(word[w], (uchar*)&be + 1, 3);
+    }
+    almanacPage(alm);
+
+#if 1
+    if (alm.svID == 27) {
+      ++alm.svID;
+      almanacPage(alm);
+    }
+#endif
+
+  }
+  fclose(bps);
+}
+
+#else
 
 void sendAlmanac() {
   int week = convertAlmanac();
@@ -476,16 +508,13 @@ void sendAlmanac() {
   // TODO: copy health from svHealth ( 0 = OK )
   // svConfig codes 0 = no info
 
-  almMsg.subframe = 5; // p 83
-  almMsg.page = 25;
   alm5p25.svID = 115 & 0x3F;   // see pg. 224
   alm5p25.toa = toa; // same as all other pages
   alm5p25.week = week & 0xFF;
   memset(alm5p25.svHealth6, 0, sizeof alm5p25.svHealth6);
   alm5p25.rsvrd = { 0, 0, 0 };
-  almanacPage(alm, false);
+  almanacPage(alm);
 
-  almMsg.subframe = 4; // p 87
   alm5p25.svID = 127 & 0x3F;   // see pg. 224
   for (int i = 0; i < 16; ++i) 
     alm4p25.svHealth4[i].svHealth0 = alm4p25.svHealth4[i].svHealth1 = 9;
@@ -495,12 +524,14 @@ void sendAlmanac() {
   alm4p25.svHealth26[0] = { 0, 0 };
   alm4p25.svHealth26[1] = { 0, 0x3F }; // 28 missing  - byte - swapped
   alm4p25.resrvd = 0;
-  almanacPage(alm, false);
+  almanacPage(alm);
 
   printf("\n for week %d\n", week);
 
   // see also p 117, 120, 226
 }
+#endif
+
 #if NUM_CHANNELS >= 8
   uchar cmd_En[] = { 'E', 'n', 0, 1, 0, 10, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // PPS on when lock to any satellite; TRAIM if possible
 #else
@@ -533,14 +564,53 @@ struct {   // otaapnnnmdyyhmspysreen sffffsffffsffffsffffsffffsffffsffffsffff
 
 uchar almanac[34*33];
 
-int main() {
 
+void setPosAndDate() { // ignored if already fixing position
+  // set date / time
+  motoCmd("Ab\000\000\000", 5);  // set GMT offset
+  motoCmd("Aw\000", 3);  // GPS time
+
+  time_t rtime; time(&rtime);
+  struct tm* pTime = gmtime(&rtime); pTime->tm_year += 1900;
+  char cmd[16];
+  sprintf(cmd, "Ac%c%c%c%c", pTime->tm_mon + 1, pTime->tm_mday, pTime->tm_year / 256, pTime->tm_year % 256);
+  motoCmd(cmd, 6);
+
+  sprintf(cmd, "Aa%c%c%c", pTime->tm_hour, pTime->tm_min, pTime->tm_sec);
+  motoCmd(cmd, 5);
+
+  motoCmd("Ac\377\377\377\377", 6);  // check date
+  int year = response[6] * 256 + response[7];
+  printf("GMT date: %d/%d/%d\n", response[4], response[5], year);
+
+  // set approx position
+  const int latitude = (int)(37.3392573 * 3600000);  // in milli arc seconds, Big endian
+  const int longitude = (int)(-122.0496515 * 3600000);
+  const int height = 80 * 100;  // in cm
+
+  struct {
+    char cmdA;
+    char cmd;
+    int val;
+    char MSL;
+  } posCmd = { 'A', 'd', 0, 1 };
+
+  posCmd.val = _byteswap_ulong(latitude);
+  motoCmd(&posCmd, 6);
+
+  posCmd.cmd = 'f';
+  posCmd.val = _byteswap_ulong(height);
+  motoCmd(&posCmd, 7, 15);    // slow reponse
+}
+
+
+int main() {
   if (sizeof(almMsg) != 33 - 5) exit(sizeof(almMsg));
   if (sizeof(En_status) != 29 + NUM_CHANNELS * 5) exit(sizeof(En_status));
 
 #if 1
   if (!openSerial("COM3", 9600)) exit(-1); // default on power-cycle
-#else
+#else  // switch from NMEA mode to binary
   if (!openSerial("COM3", 4800)) exit(-1);
   WriteFile(hCom, "$PMOTG,FOR,0*2A", 15, NULL, NULL);
   setComm(9600);
@@ -549,68 +619,31 @@ int main() {
   WriteFile(hCom, NULL, 1, NULL, NULL); // to set baud rate?
   setResponseMs(1000);
   ReadFile(hCom, response, sizeof(response), &bytesRead, NULL);  // flush
-
-  setResponseMs(10000);  // ??
+  setResponseMs(10000); 
 
   motoCmd(NUM_CHANNELS == 6 ? "Ba\000" : "Ea\000", 3, NUM_CHANNELS == 6 ? 68 : 76); // poll mode
 
   motoCmd("Cg\000", 3); // position fix off
-  motoCmd("Ab\000\000\000", 5);  // set GMT offset
-  motoCmd("Aw\000", 3);  // GPS time
-  motoCmd("Bb\000", 3, 92);
+  motoCmd("Bb\000", 3, 92); // don't send satellites
 
   motoCmd("Cj", 2, 294);
   printf("%s\n", response + 4); // ID
  
   // ReadFile(hCom, response, sizeof(response), &bytesRead, NULL);  // flush
 
-  if (1) { // ignored if already fixing position
-    // set date / time
-    time_t rtime; time(&rtime);
-    struct tm* pTime = gmtime(&rtime); pTime->tm_year += 1900;
-    char cmd[16];
-    sprintf(cmd, "Ac%c%c%c%c", pTime->tm_mon + 1, pTime->tm_mday, pTime->tm_year / 256, pTime->tm_year % 256);
-    motoCmd(cmd, 6);
-
-    sprintf(cmd, "Aa%c%c%c", pTime->tm_hour, pTime->tm_min, pTime->tm_sec);
-    motoCmd(cmd, 5);
-
-    // set approx position
-    const int latitude = (int)(37.3392573 * 3600000);  // in milli arc seconds, Big endian
-    const int longitude = (int)(-122.0496515 * 3600000);
-    const int height = 80 * 100;  // in cm
-
-    struct {    
-      char cmdA;
-      char cmd;
-      int val;
-      char MSL;      
-    } posCmd = { 'A', 'd', 0, 1 };
-
-    posCmd.val = _byteswap_ulong(latitude);
-    motoCmd(&posCmd, 6);
-
-    posCmd.cmd = 'f';
-    posCmd.val = _byteswap_ulong(height);
-    motoCmd(&posCmd, 7, 15);    // slow reponse
-  }
-
-  motoCmd("Ac\377\377\377\377", 6);  // check date
-  int year = response[6] * 256 + response[7];
-  printf("GMT date: %d/%d/%d\n", response[4], response[5], year);
-
   char almStatus[23];
   motoCmd("Bd\000", 3, sizeof almStatus, almStatus);
   if (almStatus[4]) { // save alamanc
     printf("Saving almanac ...");
     motoCmd("Be\000", 3, sizeof(almanac), almanac); // request almanac data    
-    FILE* alm = fopen("Moto.alm", "wb");
+    FILE* alm = fopen("Moto.1.alm", "wb");
     fwrite(almanac, 1, bytesRead, alm);
     fclose(alm);
     printf("\n");
-  }
-  else if (1) {
+    setPosAndDate();
+  } else if (1) {
     motoCmd("Cf", 2, 7); // factory defaults    returns Cg0 -- why?
+    setPosAndDate();
     sendAlmanac();
 
     Sleep(100);
@@ -618,14 +651,12 @@ int main() {
       printf("No Bd response to almanac data!\n");
       motoCmd("Bd\000", 3, sizeof almStatus, almStatus);
     } else {
-      ReadFile(hCom, almStatus, sizeof almStatus, &bytesRead, NULL);
+      ReadFile(hCom, almStatus, sizeof almStatus, &bytesRead, NULL);  // received almanac - repsonse all 0s!!!
+      printf("Almanac %s\n", almStatus[4] == 1 ? "OK" : "bad!");
       Sleep(100);
-      if (rxRdy()) {
-        printf("Second Bd response to almanac\n");
-        ReadFile(hCom, almStatus, sizeof almStatus, &bytesRead, NULL);
-      }
+      if (rxRdy()) 
+        ReadFile(hCom, almStatus, sizeof almStatus, &bytesRead, NULL);  // stored to EEPROM
     }
-    printf("Almanac %s\n", almStatus[4] == 1 ? "OK" : "bad!");
   }
 
   motoCmd("AB\004", 3); // set Application type static 
@@ -635,7 +666,7 @@ int main() {
 
   Sleep(100);
 
-  motoCmd("Cg\001", 3); // position fix mode (for VP units)
+//  motoCmd("Cg\001", 3); // position fix mode (for VP units)
 
 #if 0
   motoCmd("Ah\001", 3);  // manual satellite selection  
@@ -710,7 +741,7 @@ int main() {
 
 #else // Sirf  GPS-500, VK16E
 
-void almanacPage(almData& almd, bool setPage) { };
+void almanacPage(almData& almd) { };
 
 // Initialize Data Source – Message ID 128
 
@@ -755,10 +786,10 @@ void sirfCmd(void* cmd, int len) {
   WriteFile(hCom, post, 4, NULL, NULL);
 }
 
-const int MaxSeen = 2048;
+const int MaxSeen = 1024;  
 
 int numSeen; 
-uchar navData[MaxSeen][40];  // should be 125 + TOW timestamp advancing ??
+uchar navData[MaxSeen][40];
 int seen[MaxSeen];
 
 uchar line[4096];
