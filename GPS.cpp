@@ -284,10 +284,7 @@ void setField(int field, char* line) {
 
 void almanacPage(almData& almd);
 
-int convertAlmanac() {  // returns GPS week 
-  const char almPath[] = "../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0148.319488.txt";
-  // const char almPath[] = "../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0860.1996.txt";
-
+int convertAlmanac(const char* almPath) {  // returns GPS week 
   printf("Almanac %s\n   Sat\r", strrchr(almPath, '/') + 1);
   FILE* almf = fopen(almPath, "rt");
   if (!almf) exit(-5);
@@ -481,10 +478,11 @@ void almanacPage(almData& almd) {
   motoCmd(&almMsg, sizeof(almMsg), 9);
 }
 
-#if 0
+#if 1
 
 void sendAlmanac() {
-  int week = convertAlmanac();
+  // "../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0148.319488.txt"
+  int week = convertAlmanac("../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0860.1996.txt");
   uchar toa = almMsg.data.toa;  // same as others
 
   // TODO: copy health from svHealth ( 0 = OK )
@@ -517,7 +515,7 @@ void sendAlmanac() {
   // see also p 117, 120, 226
 }
 
-#elif 0
+#elif 1
 
 void sendAlmanac() {
   FILE* bps = fopen("../../../Desktop/Tools/Modules/GPS/sirf.bps.45.bin", "rb");
@@ -551,6 +549,8 @@ void sendAlmanac() {
   while (!feof(almf)) {
     char cbMsg[2 + sizeof almMsg + 3];
     if (fread(&cbMsg, 1, sizeof cbMsg, almf) < sizeof cbMsg) break;
+
+    ((almData*)(cbMsg + 2 + 2 + 2))->t = 0;  //parity doesn't matter
     motoCmd(cbMsg + 2, sizeof almMsg, 9);    
   }
   fclose(almf);
