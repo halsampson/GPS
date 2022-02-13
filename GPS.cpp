@@ -10,7 +10,8 @@
 
 // TODO: auto set 0xFF health for missing SVs
 
-// #define Sirf  // comment out for Moto Oncore
+
+#define Sirf  // comment out for Moto Oncore
 
 
 // Common routines
@@ -32,6 +33,10 @@ uint bigEnd(uint le) {
 
 ulong bigEnd(ulong le) {
   return _byteswap_ulong(le);
+}
+
+short bigEnd(short le) {
+  return (short)_byteswap_ushort((ushort)le);
 }
 
 ushort bigEnd(ushort le) {
@@ -213,7 +218,8 @@ struct {
 
 static union {
   almData  alm;
-  uchar    word[8][3];
+  uchar    almWord[8][3];
+  ushort   almShort[14];
 };
 
 
@@ -286,7 +292,7 @@ void setField(int field, char* line) {
 
 void almanacPage(almData& almd);
 
-int convertAlmanac(const char* almPath) {  // returns GPS week 
+int convertAlmanac(const char* almPath = "../../../Desktop/Tools/modules/GPS/almanac.yuma.week0149.147456.txt") {  // returns GPS week 
   printf("Almanac %s\n   Sat\r", strrchr(almPath, '/') + 1);
   FILE* almf = fopen(almPath, "rt");
   if (!almf) exit(-5);
@@ -556,8 +562,8 @@ void almanacPage(almData& almd) {
 #if 1
 
 void sendAlmanac() {
-  int week = convertAlmanac("../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0148.319488.txt");
-  // int week = convertAlmanac("../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0860.1996.txt");
+  int week = convertAlmanac();
+  // int week = convertAlmanac("../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0860.1996.txt");  // testing
   uchar toa = almMsg.data.toa;  // same as others
 
   // svConfig codes 0 = no info
@@ -597,7 +603,7 @@ void sendAlmanac() {
     for (int w = 0; w < 8; ++w) {
       uint le = (bigEnd((ulong)r50bps[w + 2]) >> 6) & 0xFFFFFF; // remove parity
       uint be = bigEnd(le);
-      memcpy(word[w], (uchar*)&be + 1, 3);
+      memcpy(almWord[w], (uchar*)&be + 1, 3);
     }
     bool missing = alm.svID == 27;
     almanacPage(alm);
@@ -779,8 +785,8 @@ void setPosition() { // ignored if already fixing position
   const int longitude = (int)(-122.0496515 * 60 * 60 * 1000);
   const int height = 80 * 100;  // in cm
 
-  motoCmd("At\000", 3); //position hold off to set position -- TODO: back on after better fix
-  motoCmd("Av\000", 3);
+  motoCmd("At\000", 3); //position hold off to set position
+  motoCmd("Av\000", 3); // altitude hold off
 
   struct {
     char cmdA;
@@ -818,11 +824,14 @@ void setPosition() { // ignored if already fixing position
   posCmd.cmd = 'e';
   posCmd.val = bigEnd(longitude);
   motoCmd(&posCmd, sizeof posCmd - 1);
+
+  motoCmd("At\001", 3); //position hold on
+  motoCmd("Av\001", 3); // altitude hold on
 }
 
 void setTime() {  // set date / time
   motoCmd("Ab\000\000\000", 5);  // set GMT offset
-  motoCmd("Aw\000", 3);  // GPS time
+  motoCmd("Aw\001", 3);  // UTC time
 
   // weekRollovers();
 
@@ -936,9 +945,6 @@ int main() {
 #else // Sirf  GPS-500, VK16E
 
 
-
-void almanacPage(almData& almd) { };
-
 // Initialize Data Source – Message ID 128
 
 /*
@@ -959,7 +965,7 @@ If SiRFDemo is used to enable NavLib data, the bit rate is automatically set to 
 #pragma pack(1)
 
 struct {
-  uchar  id;
+  uchar  msgID;
   int    x, y, z; // Big endian
   int    drift;
   uint   tow;
@@ -973,13 +979,32 @@ void sirfCmd(void* cmd, int len) {
   uchar pre[4] = {0xA0, 0xA2, (uchar)(len >> 8), (uchar)(len & 0xFF)};
   int chkSum = 0;
   for (int i = 0; i < len; ++i)
-    chkSum += (((uchar*)cmd)[i]) & 0x7FFF;
-
-  uchar post[4] = { (uchar)(chkSum >> 8), (uchar)(chkSum & 0xFF), 0xB0, 0xB3 };
+    chkSum += (((uchar*)cmd)[i]);
+  uchar post[4] = { (uchar)(chkSum >> 8), (uchar)(chkSum & 0x7F), 0xB0, 0xB3 };
 
   WriteFile(hCom, pre, 4, NULL, NULL);
   WriteFile(hCom, cmd, len, NULL, NULL);
   WriteFile(hCom, post, 4, NULL, NULL);
+}
+
+bool checkAck() {
+  uchar response[16];
+  DWORD bytesRead;
+  ReadFile(hCom, response, 10, &bytesRead, NULL);
+  bool OK = bytesRead == 10 && response[4] == 11;
+  printf(OK ? "OK\n" : "NAK\n");
+  return OK;
+}
+
+struct {
+  uchar  msgID;
+  short sirfAlm[32][14];
+} setAlmanac = { 130 };
+
+void almanacPage(almData& almd) {
+  int id = almd.svID - 1;
+  setAlmanac.sirfAlm[id][0] = almd.svHealth == 0 ? 1 : 0;
+  memcpy(setAlmanac.sirfAlm[id] + 1, &almd, sizeof almd);
 }
 
 const int MaxSeen = 1024;  
@@ -994,6 +1019,28 @@ DWORD bytesRead;
 int main() {
   openSerial("COM5", 57600);
 
+  COMMTIMEOUTS timeouts = { 0 };  // in ms
+  timeouts.ReadTotalTimeoutConstant = 500; // added to below
+  timeouts.ReadTotalTimeoutMultiplier = 0; // * num requested chars
+  timeouts.ReadIntervalTimeout = 200; // between characters
+
+  ReadFile(hCom, line, sizeof line, &bytesRead, NULL);  // flush
+
+  if (sizeof almData != 24) exit(sizeof almData);
+  int almWeek = convertAlmanac();
+  for (int id = 0; id < 32; ++id) {
+    setAlmanac.sirfAlm[id][0] |= almWeek << 6;
+    ushort checksum = 0;
+    for (int i = 0; i < 13; ++i) {
+      if (i) setAlmanac.sirfAlm[id][i] = bigEnd(setAlmanac.sirfAlm[id][i]);
+      checksum += setAlmanac.sirfAlm[id][i];
+    }
+    setAlmanac.sirfAlm[id][13] = checksum;
+  }
+
+  sirfCmd(&setAlmanac, sizeof(setAlmanac));
+  checkAck();  // NAK, also rejects SirfDemo almanac files
+
   time_t rtime; time(&rtime);
   time_t gpsSecs = rtime - 315964800; //  Jan 6, 1980 timestamp Epoch
   const int weekSecs = 7 * 24 * 60 * 60;
@@ -1003,22 +1050,16 @@ int main() {
   tow += 18; // leap seconds
 
   // send InitNav with NavLab requested
-  
   initNav.x = bigEnd(initNav.x);
   initNav.y = bigEnd(initNav.y);
   initNav.z = bigEnd(initNav.z);
-  initNav.driift = bigEnd(initNav.drift);
+  initNav.drift = bigEnd(initNav.drift);
   initNav.tow = bigEnd(tow);
   initNav.week = bigEnd(week);
   sirfCmd(&initNav, sizeof initNav);
-  // should check for ACK (message 11) vs. NACK (12)
+  checkAck();
 
-  // TODO: setAlmanac (130)
-
-  COMMTIMEOUTS timeouts = { 0 };  // in ms
-  timeouts.ReadTotalTimeoutConstant = 500; // added to below
-  timeouts.ReadTotalTimeoutMultiplier = 0; // * num requested chars
-  timeouts.ReadIntervalTimeout = 200; // between characters
+  exit(1);
 
   if (!SetCommTimeouts(hCom, &timeouts))  printf("Can't SetCommTimeouts\n");
 
