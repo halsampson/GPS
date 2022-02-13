@@ -8,9 +8,10 @@
 
 // Motorola Oncore and Sirf GPS experiments
 
-// TODO: health for missing SVs
+// TODO: auto set 0xFF health for missing SVs
 
 // #define Sirf  // comment out for Moto Oncore
+
 
 // Common routines
 
@@ -19,17 +20,22 @@
 typedef unsigned char uchar;
 typedef unsigned short ushort;
 typedef unsigned int uint;
+typedef unsigned long ulong; // also 4 bytes
 
-void bigEnd(int& le) {
-  le = _byteswap_ulong((uint)le);
+int bigEnd(int le) {
+  return _byteswap_ulong((uint)le);
 }
 
-void bigEnd(uint& le) {
-  le = _byteswap_ulong(le);
+uint bigEnd(uint le) {
+  return _byteswap_ulong(le);
 }
 
-void bigEnd(ushort& le) {
-  le = _byteswap_ushort(le);
+ulong bigEnd(ulong le) {
+  return _byteswap_ulong(le);
+}
+
+ushort bigEnd(ushort le) {
+  return _byteswap_ushort(le);
 }
 
 HANDLE hCom = NULL;
@@ -137,7 +143,7 @@ typedef struct {
   // Big endian
   uchar svID : 6;     // see pg 224 ??
   uchar dataID : 2;   // 1  see pg. 113
-  unsigned short eccentric;  // -21      Eccentricity
+  ushort eccentric;  // -21      Eccentricity
 
   // scale (2^N LSB)
   uchar toa;        //  12      Time of Applicability (seconds)
@@ -268,8 +274,8 @@ void setField(int field, char* line) {
     }
     break;
 
-  case 16: {unsigned short bigEnd = _byteswap_ushort((unsigned short)set); *(unsigned short*)pField[field] = bigEnd; } break;
-  case 24: {unsigned long  bigEnd = _byteswap_ulong((unsigned long)set); memcpy(pField[field], (char*)&bigEnd + 1, 3); } break;
+  case 16: {ushort be = bigEnd((ushort)set); *(ushort*)pField[field] = be; } break;
+  case 24: {ulong  be = bigEnd((ulong)set); memcpy(pField[field], (char*)&be + 1, 3); } break;
   default: printf("Width %d!\n", width[field]); break;
   }
 }
@@ -586,11 +592,11 @@ void sendAlmanac() {
 void sendAlmanac() {
   FILE* bps = fopen("../../../Desktop/Tools/Modules/GPS/sirf.bps.45.bin", "rb");
   while (!feof(bps)) {
-    unsigned int r50bps[10];
+    uint r50bps[10];
     if (fread(r50bps, 1, sizeof r50bps, bps) < sizeof r50bps) break;
     for (int w = 0; w < 8; ++w) {
-      unsigned int le = (_byteswap_ulong((unsigned long)r50bps[w + 2]) >> 6) & 0xFFFFFF; // remove parity
-      unsigned int be = _byteswap_ulong(le);
+      uint le = (bigEnd((ulong)r50bps[w + 2]) >> 6) & 0xFFFFFF; // remove parity
+      uint be = bigEnd(le);
       memcpy(word[w], (uchar*)&be + 1, 3);
     }
     bool missing = alm.svID == 27;
@@ -647,7 +653,7 @@ struct {   // otaapnnnmdyyhmspysreen sffffsffffsffffsffffsffffsffffsffffsffff
   char cmd[4];  // @@En or Bn
   char rate;
   char RAIM_on;
-  unsigned short alarm;  // Big endian !!
+  ushort alarm;  // Big endian !!
   char PPS;
   char PPSrate[3]; // ???
   char nextFire[7];
@@ -655,7 +661,7 @@ struct {   // otaapnnnmdyyhmspysreen sffffsffffsffffsffffsffffsffffsffffsffff
   char pulseSync;
   char solnStatus;
   char RAIM_Status;
-  unsigned short sigma_ns;
+  ushort sigma_ns;
   char negSawtooth;
 
   struct {
@@ -670,7 +676,7 @@ struct {   // otaapnnnmdyyhmspysreen sffffsffffsffffsffffsffffsffffsffffsffff
   char cmd[4];  // @@En or Bn
   char rate;
   char RAIM_on;
-  unsigned short alarm;  // Big endian !!
+  ushort alarm;  // Big endian !!
   char PPS;
   char PPSrate[3]; // ???
   char nextFire[7];
@@ -678,7 +684,7 @@ struct {   // otaapnnnmdyyhmspysreen sffffsffffsffffsffffsffffsffffsffffsffff
   char pulseSync;
   char solnStatus;
   char RAIM_Status;
-  unsigned short sigma_ns;
+  ushort sigma_ns;
   char negSawtooth;
 
   struct {
@@ -769,11 +775,11 @@ void updateAlmanac() {
 
 void setPosition() { // ignored if already fixing position
   // set approx position
-  const int latitude =    (int)(37.3392573 * 3600000);  // in milli arc seconds, Big endian
-  const int longitude = (int)(-122.0496515 * 3600000);
+  const int latitude =    (int)(37.3392573 * 60 * 60 * 1000);  // in milli arc seconds
+  const int longitude = (int)(-122.0496515 * 60 * 60 * 1000);
   const int height = 80 * 100;  // in cm
 
-  motoCmd("At\000", 3); //position hold off to set position
+  motoCmd("At\000", 3); //position hold off to set position -- TODO: back on after better fix
   motoCmd("Av\000", 3);
 
   struct {
@@ -785,9 +791,9 @@ void setPosition() { // ignored if already fixing position
     char MSL;
   } posHoldCmd = { 'A', 's'};
 
-  posHoldCmd.lati = _byteswap_ulong(latitude);
-  posHoldCmd.longi = _byteswap_ulong(longitude);
-  posHoldCmd.height = _byteswap_ulong(height);
+  posHoldCmd.lati = bigEnd(latitude); // Big endian
+  posHoldCmd.longi = bigEnd(longitude);
+  posHoldCmd.height = bigEnd(height);
   posHoldCmd.MSL = 1;
   motoCmd(&posHoldCmd, sizeof posHoldCmd);
 
@@ -799,18 +805,18 @@ void setPosition() { // ignored if already fixing position
   } posCmd = { 'A', 'd', 0, 1 };
 
   posCmd.cmd = 'u';  // altitude hold
-  posCmd.val = _byteswap_ulong(height);
+  posCmd.val = bigEnd(height);
   motoCmd(&posCmd, sizeof posCmd);
 
   posCmd.cmd = 'f';
   motoCmd(&posCmd, sizeof posCmd, 15);    // slow response
 
   posCmd.cmd = 'd';
-  posCmd.val = _byteswap_ulong(latitude);
-  motoCmd(&posCmd, sizeof posCmd - 1);
+  posCmd.val = bigEnd(latitude);
+  motoCmd(&posCmd, sizeof posCmd - 1); // no MSL
 
   posCmd.cmd = 'e';
-  posCmd.val = _byteswap_ulong(longitude);
+  posCmd.val = bigEnd(longitude);
   motoCmd(&posCmd, sizeof posCmd - 1);
 }
 
@@ -829,7 +835,7 @@ void setTime() {  // set date / time
   sprintf(cmd, "Aa%c%c%c", pTime->tm_hour, pTime->tm_min, pTime->tm_sec);
   motoCmd(cmd, 5);
 
-  motoCmd("Cg\001", 3); // start clock, position fix mode (for VP units)
+  motoCmd("Cg\001", 3); // start clock, idle off position fix mode (for VP units)
 
   motoCmd("Ac\377\377\377\377", 6);  // check date
   printf("GMT date set: %d/%d/%d\n", response[4], response[5], response[6] * 256 + response[7]);
@@ -868,7 +874,7 @@ int main() {
   printf("GMT date was: %d/%d/%d\n", response[4], response[5], response[6] * 256 + response[7]);
 #endif
 
-  motoCmd(numChannels == 6 ? "Ca"  : "Fa", 2, 9);  //self test
+  motoCmd(numChannels < 8 ? "Ca" : "Fa", 2, 9);  //self test
   if (response[4] || response[5])
     printf("Self test fail\n");
 
@@ -927,10 +933,9 @@ int main() {
 
 
 
-
-
-
 #else // Sirf  GPS-500, VK16E
+
+
 
 void almanacPage(almData& almd) { };
 
@@ -999,12 +1004,12 @@ int main() {
 
   // send InitNav with NavLab requested
   
-  bigEnd(initNav.x);
-  bigEnd(initNav.y);
-  bigEnd(initNav.z);
-  bigEnd(initNav.drift);
-  bigEnd(initNav.tow = tow);
-  bigEnd(initNav.week = week);
+  initNav.x = bigEnd(initNav.x);
+  initNav.y = bigEnd(initNav.y);
+  initNav.z = bigEnd(initNav.z);
+  initNav.driift = bigEnd(initNav.drift);
+  initNav.tow = bigEnd(tow);
+  initNav.week = bigEnd(week);
   sirfCmd(&initNav, sizeof initNav);
   // should check for ACK (message 11) vs. NACK (12)
 
@@ -1072,7 +1077,7 @@ int main() {
 
         printf("%3dx%3d: ", seen[bestSeen], almPage);
         for (int p = 2; p < 10; ++p) {
-          unsigned int word = _byteswap_ulong(*(unsigned long*)&navData[bestSeen][4 * p]) >> 6 & 0xFFFFFF; // remove parity
+          uint word = _byteswap_ulong(*(ulong*)&navData[bestSeen][4 * p]) >> 6 & 0xFFFFFF; // remove parity
           printf("%06X ", word);
         }
         printf("\n");
