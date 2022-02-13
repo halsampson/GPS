@@ -743,7 +743,7 @@ void weekRollovers() {
 void updateAlmanac() {  
   char almStatus[23];
   motoCmd("Bd\000", 3, sizeof almStatus, almStatus);
-  if (almStatus[4]) {  // TODO: update if have later almanac -- check week
+  if (almStatus[4]) {  // TODO: only update if have later almanac -- check week
     printf("Almanac in EEPROM or RAM\n");  // check week!
 #if 0
     // save alamanc
@@ -754,7 +754,7 @@ void updateAlmanac() {
     fclose(alm);
     printf("\n");
 #endif
-    return;
+    // return;
   } 
   sendAlmanac();
 
