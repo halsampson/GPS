@@ -1,41 +1,54 @@
 // GPS.cpp 
 
-#include <windows.h>
+
+#ifdef _MSC_VER
+  #include <windows.h>
+  #include <conio.h>
+  #pragma warning(disable : 6031)
+#else
+  #include <unistd.h>
+  #include <memory.h>
+  #include <sys/ioctl.h>
+  #define _byteswap_ulong  __builtin_bswap32
+  #define _byteswap_ushort __builtin_bswap16
+  #define  DWORD uint
+  #define Sleep sleep
+
+  #define HANDLE FILE*
+  #define WriteFile(stream, ptr, count, written, overlap) fwrite(ptr, 1, count, stream)
+  #define ReadFile(stream, ptr, count, bytesRead, overlapped)  *bytesRead = fread(ptr, 1, count, stream)
+  #define CloseHandle fclose
+#endif
+
+#include <stdlib.h>
 #include <stdio.h>
-#include <conio.h>
 #include <time.h> 
 #include <math.h>
 
+
 // Motorola Oncore and Sirf GPS experiments
 
-// TODO: Ubuntu build for small laptop
- 
-// TODO: auto set 0xFF health for missing SVs
-
+// TODO: Ubuntu build for small laptop outdoors
 // message structs to .h file
+
+
+// TODO: auto set 0xFF health for missing SVs
+// curl latest almanac
 
 // #define Sirf  // comment out for Moto Oncore
 
 
-
 // Common routines
 
-#pragma warning(disable : 6031)
-
-typedef unsigned char uchar;
+typedef unsigned char  uchar;
 typedef unsigned short ushort;
-typedef unsigned int uint;
-typedef unsigned long ulong; // also 4 bytes
+typedef unsigned int   uint;
 
 int bigEnd(int le) {
   return _byteswap_ulong((uint)le);
 }
 
 uint bigEnd(uint le) {
-  return _byteswap_ulong(le);
-}
-
-ulong bigEnd(ulong le) {
   return _byteswap_ulong(le);
 }
 
@@ -48,6 +61,9 @@ ushort bigEnd(ushort le) {
 }
 
 HANDLE hCom = NULL;
+
+#ifdef _MSC_VER
+
 DCB dcb;
 
 void setResponseMs(DWORD ms) {
@@ -95,13 +111,81 @@ int rxRdy(void) {
 }
 
 
-
 void setComm(int baudRate, bool dtrEnable = true, bool rtsEnable = true) {
   dcb.BaudRate = baudRate;
   dcb.fDtrControl = dtrEnable ? DTR_CONTROL_ENABLE : DTR_CONTROL_DISABLE;
-  dcb.fRtsControl =  rtsEnable ? RTS_CONTROL_ENABLE : RTS_CONTROL_DISABLE;
+  dcb.fRtsControl = rtsEnable ? RTS_CONTROL_ENABLE : RTS_CONTROL_DISABLE;
   SetCommState(hCom, &dcb);
 }
+
+#else
+
+#include <fcntl.h>
+#include <termios.h> 
+
+#define TCSANOW 0
+#ifndef ECHO
+#define ECHO 10
+#endif
+#define ICANON	0000002
+
+#define F_GETFL 3
+#define F_SETFL 4
+#ifndef O_NONBLOCK
+#define O_NONBLOCK 0x400
+#endif
+
+struct termios setAttr() {
+  struct termios oldt, newt;
+  tcgetattr(STDIN_FILENO, &oldt);
+  newt = oldt;
+  newt.c_lflag &= ~(ICANON | ECHO);
+  tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+  return oldt;
+}
+
+int _getch() {
+  struct termios oldt = setAttr();
+
+  int ch = getchar();
+  tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+  return ch;
+}
+
+int _kbhit() {
+  struct termios oldt = setAttr();
+
+  int oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
+  fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
+
+  int ch = getchar();
+
+  tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+  fcntl(STDIN_FILENO, F_SETFL, oldf);
+
+  if (ch != EOF) {
+    ungetc(ch, stdin);
+    return 1;
+  }
+  return 0;
+}
+
+
+#define setResponseMs(a)
+
+int openSerial(const char* portName, int baudRate = 9600) {
+  system("stty -F /dev/ttyACM0 -echo");
+  return open("/dev/ttyACM0", O_RDWR);
+}
+
+int rxRdy(void) {
+  int available;
+  ioctl(fileno(hCom), FIONREAD, &available);
+  return available;
+}
+
+#endif
+
 
 void nmeaCmd(const char* cmd) { // w/o $ and *
   int chksum = 0;
@@ -192,14 +276,14 @@ typedef  struct {
 struct {
   uchar svID : 6;
   uchar dataID : 2;   // 1  see pg. 113
-  
+
   uchar toa;
   uchar week;
 
   svHealth6w svHealth6[6]; // for SV1..24  - copy svHealth or 0
 
   int24 rsvrd; // LS t : 2;  // parity
-} alm5p25 = { 115, 1};
+} alm5p25 = { 115 & 0x3F, 1 };
 
 
 typedef struct {
@@ -211,13 +295,13 @@ typedef struct {
 struct {
   uchar svID : 6;
   uchar dataID : 2;   // 1 : see pg. 113
- 
+
   svHealth4b svHealth4[16];
   uchar svHealth25 : 6;
-  uchar resrvd     : 2;
+  uchar resrvd : 2;
 
   svHealth6w svHealth26[2];  // last field reserved 
-} alm4p25 = { 127, 1 };
+} alm4p25 = { 127 & 0x3F, 1 };
 
 
 static union {
@@ -237,20 +321,20 @@ const int width[12] = { 6,  8,  16,  8,   16,  16,  24,  24,   24,  24,  11,  11
 
 void setField(int field, char* line) {
   if (field == 1) {// svHealth
-    alm.svHealth = atoi(line + 27);
+    alm.svHealth = (uchar)atoi(line + 27);
     if (alm.svHealth >= 63) alm.svHealth |= 0xC0;  // summary bits
     return;
   }
 
   switch (width[field]) {
-    case  6: alm.svID = atoi(line + 27); 
-      // fall thru to set dataID
-    case  2: alm.dataID = 1;
-      return;
+  case  6: alm.svID = (uchar)atoi(line + 27) & 0x3F;
+    // fall thru to set dataID
+  case  2: alm.dataID = 1;
+    return;
   }
 
   double val = atof(line + 27);
-  const double PI = 3.141592653589793238462643383279502884L;
+  const double PI = 3.141592653589793238462643383279502884;
   switch (field) {
   case 4:
   case 5:
@@ -264,7 +348,7 @@ void setField(int field, char* line) {
 
   val /= pow(2, scale[field]);  // scale  LSB 
 
-  if (val >= pow(2, width[field]) || val < -pow(2, width[field])/2) {  // check fit in width
+  if (val >= pow(2, width[field]) || val < -pow(2, width[field]) / 2) {  // check fit in width
     printf("In %s field %d of svID %d: %.0f won't fit\n", line, field, alm.svID, val);
     exit(-6);
   }
@@ -283,7 +367,7 @@ void setField(int field, char* line) {
     break;
 
   case 16: {ushort be = bigEnd((ushort)set); *(ushort*)pField[field] = be; } break;
-  case 24: {ulong  be = bigEnd((ulong)set); memcpy(pField[field], (char*)&be + 1, 3); } break;
+  case 24: {uint  be = bigEnd((uint)set); memcpy(pField[field], (char*)&be + 1, 3); } break;
   default: printf("Width %d!\n", width[field]); break;
   }
 }
@@ -351,7 +435,7 @@ bool motoCmd(const void* cmd, int len, int responseLen = -1, void* pResponse = r
     if (cmd) {
       uchar sum = 0;
       for (int p = 0; p < len; ++p)
-        sum ^= ((char*)cmd)[p]; // XOR of message bytes after @@ and before checksum
+        sum ^= ((uchar*)cmd)[p]; // XOR of message bytes after @@ and before checksum
 
       memcpy(send + 2, cmd, len);
       send[2 + len] = sum;  // checksum
@@ -363,11 +447,11 @@ bool motoCmd(const void* cmd, int len, int responseLen = -1, void* pResponse = r
     if (!responseLen) return true; // no response
 
     if (responseLen < 0) responseLen = 2 + len + 3;
-    bool OK = ReadFile(hCom, pResponse, responseLen, &bytesRead, NULL);
-    
+    ReadFile(hCom, pResponse, responseLen, &bytesRead, NULL);
+
     if (((char*)pResponse)[2] == 'Q') {  // QX after power cycle
       printf("Q");
-      char restOfQ[128]; 
+      char restOfQ[128];
       ReadFile(hCom, restOfQ, sizeof restOfQ, &bytesRead, NULL);  // flush, wait
       Sleep(5000);
       continue;
@@ -378,7 +462,7 @@ bool motoCmd(const void* cmd, int len, int responseLen = -1, void* pResponse = r
       int wordPos = 0;
       for (int i = 0; i < 2 + len + 3; ++i) {
         printf("%02X", send[i]);
-        if (!(++wordPos % 3) && wordPos != 3 || wordPos == 4) 
+        if (!(++wordPos % 3) && wordPos != 3 || wordPos == 4)
           printf(" ");
       }
       printf("\n");
@@ -389,16 +473,16 @@ bool motoCmd(const void* cmd, int len, int responseLen = -1, void* pResponse = r
     }
 #endif
 
-    if (bytesRead == responseLen
-    && *(char*)pResponse == '@'
-    && ((char*)pResponse)[bytesRead - 1] == '\n') 
+    if ((int)bytesRead == responseLen
+      && *(char*)pResponse == '@'
+      && ((char*)pResponse)[bytesRead - 1] == '\n')
       return true;
 
-    printf("%s -> ", (char*)cmd); 
+    printf("%s -> ", (char*)cmd);
     fwrite(pResponse, 1, bytesRead, stdout);
     printf("\n");
     Sleep(1000);
-  } 
+  }
 }
 
 typedef struct {
@@ -501,8 +585,8 @@ struct {
 
 void setSubframeAndPage(int id) {
   switch (64 + id) {
-    case 115: almMsg.subframe = 5; almMsg.page = 25; return;
-    case 127: almMsg.subframe = 4; almMsg.page = 25; return;
+  case 115: almMsg.subframe = 5; almMsg.page = 25; return;
+  case 127: almMsg.subframe = 4; almMsg.page = 25; return;
   }
 
   almMsg.subframe = id < 25 ? 5 : 4;  // 24 in subframe 5, 8 in subframe 4  pgs 2..5  7..10
@@ -531,18 +615,20 @@ void almanacPage(almData& almd) {
   if (id < 25) {
     int index = (id - 1) / 4;
     switch (id % 4) {
-    case 1 : alm5p25.svHealth6[index].svh0 = health6b; break;
-    case 2 : 
+    case 1: alm5p25.svHealth6[index].svh0 = health6b; break;
+    case 2:
       alm5p25.svHealth6[index].svh1ms = health6b >> 4;
       alm5p25.svHealth6[index].svh1ls = health6b & 0xF; break;
-    case 3 :
+    case 3:
       alm5p25.svHealth6[index].svh2ms = health6b >> 2;
       alm5p25.svHealth6[index].svh2ls = health6b & 3; break;
-    case 0 : alm5p25.svHealth6[index].svh3 = health6b; break;
-    }    
-  } else if (id == 25) {
+    case 0: alm5p25.svHealth6[index].svh3 = health6b; break;
+    }
+  }
+  else if (id == 25) {
     alm4p25.svHealth25 = health6b;
-  } else if (id <= 32)  {
+  }
+  else if (id <= 32) {
     int index = (id - 26) / 4;
     switch (id % 4) {
     case 2: alm4p25.svHealth26[index].svh0 = health6b; break;
@@ -608,7 +694,7 @@ void sendAlmanac() {
     uint r50bps[10];
     if (fread(r50bps, 1, sizeof r50bps, bps) < sizeof r50bps) break;
     for (int w = 0; w < 8; ++w) {
-      uint le = (bigEnd((ulong)r50bps[w + 2]) >> 6) & 0xFFFFFF; // remove parity
+      uint le = (bigEnd((uint)r50bps[w + 2]) >> 6) & 0xFFFFFF; // remove parity
       uint be = bigEnd(le);
       memcpy(almWord[w], (uchar*)&be + 1, 3);
     }
@@ -711,7 +797,7 @@ struct {   // otaapnnnmdyyhmspysreen sffffsffffsffffsffffsffffsffffsffffsffff
 } En_status;
 
 
-uchar almanac[34*33];
+uchar almanac[34 * 33];
 
 #if 0
 void weekRollovers() {  // no need
@@ -753,7 +839,7 @@ void weekRollovers() {  // no need
 
 const char* newAlmanacPath;
 
-void updateAlmanac() {  
+void updateAlmanac() {
   char almStatus[23];
   motoCmd("Bd\000", 3, sizeof almStatus, almStatus);
   if (almStatus[4]) {  // TODO: update if have later almanac -- check week
@@ -768,7 +854,7 @@ void updateAlmanac() {
     printf("\n");
 #endif
     if (!newAlmanacPath) return;
-  } 
+  }
   sendAlmanac(newAlmanacPath);
 
   Sleep(1000);
@@ -794,7 +880,7 @@ void updateAlmanac() {
 
 void setPosition() { // ignored if already fixing position
   // set approx position
-  const int latitude =    (int)(37.3392573 * 60 * 60 * 1000);  // in milli arc seconds
+  const int latitude = (int)(37.3392573 * 60 * 60 * 1000);  // in milli arc seconds
   const int longitude = (int)(-122.0496515 * 60 * 60 * 1000);
   const int height = 80 * 100;  // in cm
 
@@ -808,7 +894,7 @@ void setPosition() { // ignored if already fixing position
     int  longi;
     int  height;
     char MSL;
-  } posHoldCmd = { 'A', 's'};
+  } posHoldCmd = { 'A', 's' };
 
   posHoldCmd.lati = bigEnd(latitude); // Big endian
   posHoldCmd.longi = bigEnd(longitude);
@@ -873,7 +959,7 @@ void initOncore() {
   motoCmd("Bb\000", 3, 92); // don't send satellites
 
   motoCmd(numChannels < 8 ? "Ba\000" : "Ea\000", 3, numChannels < 8 ? sizeof BaResponse : sizeof EaResponse); // poll mode
-  
+
 #if 0
   motoCmd("Cf", 2, 7); // factory defaults    returns Cg0 -- why?
   motoCmd("Ac\377\377\377\377", 6);  // check date
@@ -893,8 +979,9 @@ void initOncore() {
   if (numChannels < 8) {
     cmd_En[0] = 'B';
     motoCmd(cmd_En, sizeof cmd_En, sizeof Bn_status);
-  } else motoCmd(cmd_En, sizeof cmd_En, sizeof En_status);  // enable 1 PPS
-  // printf(" %d %d %d %d", En_status.pulseStatus, En_status.solnStatus, En_status.RAIM_Status, En_status.negSawtooth);
+  }
+  else motoCmd(cmd_En, sizeof cmd_En, sizeof En_status);  // enable 1 PPS
+// printf(" %d %d %d %d", En_status.pulseStatus, En_status.solnStatus, En_status.RAIM_Status, En_status.negSawtooth);
 }
 
 
@@ -904,7 +991,7 @@ int main(int argc, char** argv) {
 
 #if 1
   if (!openSerial("COM34", 9600))  // default on power-cycle
-  if (!openSerial("COM3", 9600)) exit(-1); // default on power-cycle
+    if (!openSerial("COM3", 9600)) exit(-1); // default on power-cycle
 #else  // switch from NMEA mode to binary
   if (!openSerial("COM3", 4800)) exit(-1);
   WriteFile(hCom, "$PMOTG,FOR,0*2A", 15, NULL, NULL);
@@ -915,7 +1002,7 @@ int main(int argc, char** argv) {
   setResponseMs(200);
   ReadFile(hCom, response, sizeof response, &bytesRead, NULL);  // flush
 
-  setResponseMs(10000); 
+  setResponseMs(10000);
 
   motoCmd("Cj", 2, 294);
   response[bytesRead] = 0;
@@ -945,7 +1032,8 @@ int main(int argc, char** argv) {
         for (int s = 0; s < numChannels; ++s) {
           if (EaResponse.sat[s].trackMode) {
             printf("%2d: %d+%3d  ", EaResponse.sat[s].satID, EaResponse.sat[s].trackMode, EaResponse.sat[s].SNR);
-          } else {
+          }
+          else {
             ++notLocked;
             totalBadSNR += EaResponse.sat[s].SNR;
           }
@@ -961,13 +1049,14 @@ int main(int argc, char** argv) {
         // "The signal strength value is meaningless when the channel tracking mode is zero."  *****
         // kick out worst signal, replace with channel thrown out longest ago
         char satSelect[16];
-        sprintf(satSelect, "Ai%c%c", worstCh + 1, onDeck[oldPtr]);  
+        sprintf(satSelect, "Ai%c%c", worstCh + 1, onDeck[oldPtr]);
         motoCmd(satSelect, 4);
         onDeck[oldPtr] = worstSV;
         if (++oldPtr >= 24)
           oldPtr = 0;
 #endif
-      } else printf("Read %d  ", bytesRead);
+      }
+      else printf("Read %d  ", bytesRead);
       Sleep(5000); // * (32 - 8) = 24 satellites to check
     }
   } while (_getch() != 27);  // Escape
@@ -985,15 +1074,15 @@ int main(int argc, char** argv) {
 // Initialize Data Source – Message ID 128
 
 /*
-If Nav Lib data are enabled, the resulting messages are enabled: 
-  Clock Status(Message ID 7),  
+If Nav Lib data are enabled, the resulting messages are enabled:
+  Clock Status(Message ID 7),
   50BPS(Message ID 8) *****,
-  Raw DGPS(Message ID 17), 
-  NL Measurement Data(Message ID 28), 
-  DGPS Data(Message ID 29), 
-  SV State Data (Message ID 30), and 
-  NL Initialized Data(Message ID 31). 
-  
+  Raw DGPS(Message ID 17),
+  NL Measurement Data(Message ID 28),
+  DGPS Data(Message ID 29),
+  SV State Data (Message ID 30), and
+  NL Initialized Data(Message ID 31).
+
 All messages sent at 1 Hz.
 
 If SiRFDemo is used to enable NavLib data, the bit rate is automatically set to 57600 by SiRFDemo.
@@ -1009,11 +1098,11 @@ struct {
   ushort week;
   uchar  channels;
   uchar  reset;
-} initNav = {128,-2694294,-4303469,3847444,91477,0,2196,12,0x51};   // RTC imprecise (1 sec)
+} initNav = { 128,-2694294,-4303469,3847444,91477,0,2196,12,0x51 };   // RTC imprecise (1 sec)
 
 
 void sirfCmd(void* cmd, int len) {
-  uchar pre[4] = {0xA0, 0xA2, (uchar)(len >> 8), (uchar)(len & 0xFF)};
+  uchar pre[4] = { 0xA0, 0xA2, (uchar)(len >> 8), (uchar)(len & 0xFF) };
   int chkSum = 0;
   for (int i = 0; i < len; ++i)
     chkSum += (((uchar*)cmd)[i]);
@@ -1044,9 +1133,9 @@ void almanacPage(almData& almd) {
   memcpy(setAlmanac.sirfAlm[id] + 1, &almd, sizeof almd);
 }
 
-const int MaxSeen = 1024;  
+const int MaxSeen = 1024;
 
-int numSeen; 
+int numSeen;
 uchar navData[MaxSeen][40];
 int seen[MaxSeen];
 
@@ -1136,8 +1225,8 @@ int main() {
       for (int almPage = 1; almPage <= 34; ++almPage) {
         int svID = 64 + almPage;  // DATA ID | SV ID  -- spec is confusing
         switch (almPage) {
-          case 33: svID = 115; break; // svHealth
-          case 34: svID = 127; break;
+        case 33: svID = 115; break; // svHealth
+        case 34: svID = 127; break;
         }
 
         int maxSeen = 0;
@@ -1155,7 +1244,7 @@ int main() {
 
         printf("%3dx%3d: ", seen[bestSeen], almPage);
         for (int p = 2; p < 10; ++p) {
-          uint word = _byteswap_ulong(*(ulong*)&navData[bestSeen][4 * p]) >> 6 & 0xFFFFFF; // remove parity
+          uint word = bigend((*(uint*)&navData[bestSeen][4 * p]) >> 6 & 0xFFFFFF; // remove parity
           printf("%06X ", word);
         }
         printf("\n");
@@ -1244,7 +1333,7 @@ void nmea() {
 
     for (DWORD i = 0; i < bytesRead; ++i)
       printf("%02X ", line[i]);
-    printf("\n\n");    
+    printf("\n\n");
 
     fwrite(line, 1, bytesRead, sirf);
   }
