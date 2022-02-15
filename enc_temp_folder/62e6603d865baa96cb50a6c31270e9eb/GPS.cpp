@@ -8,10 +8,14 @@
 
 // Motorola Oncore and Sirf GPS experiments
 
+// TODO: Ubuntu build for small laptop
+ 
 // TODO: auto set 0xFF health for missing SVs
 
+// message structs to .h file
 
 // #define Sirf  // comment out for Moto Oncore
+
 
 
 // Common routines
@@ -223,8 +227,6 @@ static union {
 };
 
 
-
-
 // fields in .alm file order:
 void* const pField[12] = { &alm, &alm.svHealth, &alm.eccentric, &alm.toa,
                            &alm.deltaI, &alm.OmegaDot, &alm.rootA, &alm.Omega0,
@@ -293,9 +295,14 @@ void setField(int field, char* line) {
 void almanacPage(almData& almd);
 
 int convertAlmanac(const char* almPath = "../../../Desktop/Tools/modules/GPS/almanac.yuma.week0149.147456.txt") {  // returns GPS week 
-  printf("Almanac %s\n   Sat\r", strrchr(almPath, '/') + 1);
   FILE* almf = fopen(almPath, "rt");
+  if (!almf) {
+    almPath = "almanac.yuma.week0149.147456.txt";
+    almf = fopen(almPath, "rt");
+  }
+  printf("Almanac %s\n   Sat\r", almPath);
   if (!almf) exit(-5);
+
   alm.dataID = 1;   // TODO: see pg. 113
   int week;
   while (1) {
@@ -328,7 +335,6 @@ int convertAlmanac(const char* almPath = "../../../Desktop/Tools/modules/GPS/alm
   fclose(almf);
   return week;
 }
-
 
 
 #ifndef Sirf  // Moto Oncore
@@ -388,7 +394,9 @@ bool motoCmd(const void* cmd, int len, int responseLen = -1, void* pResponse = r
     && ((char*)pResponse)[bytesRead - 1] == '\n') 
       return true;
 
-    printf("%s -> %s\n", (char*)cmd, (char*)pResponse); 
+    printf("%s -> ", (char*)cmd); 
+    fwrite(pResponse, 1, bytesRead, stdout);
+    printf("\n");
     Sleep(1000);
   } 
 }
@@ -653,6 +661,8 @@ void watchBroadcast() {  // no response
 }
 
 
+// TODO: struct for En
+
 uchar cmd_En[] = { 'E', 'n', 0, 1, 0, 10, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // PPS on when lock to any satellite; TRAIM if possible; // Bn for 6 ch
 
 struct {   // otaapnnnmdyyhmspysreen sffffsffffsffffsffffsffffsffffsffffsffff
@@ -704,8 +714,8 @@ struct {   // otaapnnnmdyyhmspysreen sffffsffffsffffsffffsffffsffffsffffsffff
 
 uchar almanac[34*33];
 
-
-void weekRollovers() {
+#if 0
+void weekRollovers() {  // no need
   const int extraSecs = 1;
   char cmd[16];
 
@@ -739,11 +749,15 @@ void weekRollovers() {
 
   motoCmd("Cg\000", 3); // idle
 }
+#endif
+
+
+bool forceAlmanacUpdate;
 
 void updateAlmanac() {  
   char almStatus[23];
   motoCmd("Bd\000", 3, sizeof almStatus, almStatus);
-  if (almStatus[4]) {  // TODO: only update if have later almanac -- check week
+  if (almStatus[4]) {  // TODO: update if have later almanac -- check week
     printf("Almanac in EEPROM or RAM\n");  // check week!
 #if 0
     // save alamanc
@@ -754,7 +768,7 @@ void updateAlmanac() {
     fclose(alm);
     printf("\n");
 #endif
-    // return;
+    if (!forceAlmanacUpdate) return;
   } 
   sendAlmanac();
 
@@ -841,10 +855,13 @@ void setTime() {  // set date / time
   sprintf(cmd, "Ac%c%c%c%c", pTime->tm_mon + 1, pTime->tm_mday, pTime->tm_year / 256, pTime->tm_year % 256);
   motoCmd(cmd, 6);
 
+  time(&rtime);
+  pTime = gmtime(&rtime);
   sprintf(cmd, "Aa%c%c%c", pTime->tm_hour, pTime->tm_min, pTime->tm_sec);
   motoCmd(cmd, 5);
 
   motoCmd("Cg\001", 3); // start clock, idle off position fix mode (for VP units)
+  Sleep(500);
 
   motoCmd("Ac\377\377\377\377", 6);  // check date
   printf("GMT date set: %d/%d/%d\n", response[4], response[5], response[6] * 256 + response[7]);
@@ -882,8 +899,11 @@ void initOncore() {
 }
 
 
-int main() {
+int main(int argc, char** argv) {
+  forceAlmanacUpdate = argc > 1 && argv[1][0] == 'f';
+
 #if 1
+  if (!openSerial("COM34", 9600))  // default on power-cycle
   if (!openSerial("COM3", 9600)) exit(-1); // default on power-cycle
 #else  // switch from NMEA mode to binary
   if (!openSerial("COM3", 4800)) exit(-1);
@@ -906,29 +926,37 @@ int main() {
   initOncore();
 #else
   motoCmd("Cg\001", 3); // idle off
+  Sleep(500);
 #endif
 
   motoCmd("Aa\377\377\377", 5);  // check time
   printf("%02d:%02d:%02d GMT\n", response[4], response[5], response[6]);
   printf("\n");
 
-  // watchBroadcast();  // no lock/data !!  antenna? ...
+  // watchBroadcast();
 
   do {
     while (!_kbhit()) {
       if (motoCmd(numChannels < 8 ? "Ba\000" : "Ea\000", 3, numChannels < 8 ? sizeof BaResponse : sizeof EaResponse, &EaResponse)) { // unsolicited 1/sec  (or slower with longer serial timeout)              
         int worstSignal = 256;
         int worstCh, worstSV;
+        int totalBadSNR = 0;
+        int notLocked = 0;
         for (int s = 0; s < numChannels; ++s) {
-          printf("%2d:%d+%3d  ", EaResponse.sat[s].satID, EaResponse.sat[s].trackMode, EaResponse.sat[s].SNR);
+          if (EaResponse.sat[s].trackMode) {
+            printf("%2d: %d+%3d  ", EaResponse.sat[s].satID, EaResponse.sat[s].trackMode, EaResponse.sat[s].SNR);
+          } else {
+            ++notLocked;
+            totalBadSNR += EaResponse.sat[s].SNR;
+          }
           if (EaResponse.sat[s].SNR < worstSignal) {  // no signal -> 100 ??
             worstSignal = EaResponse.sat[s].SNR;
             worstSV = EaResponse.sat[s].satID;
             worstCh = s;
           }
         }
-        printf("%X", numChannels < 8 ? *(uchar*)&BaResponse.rcvrStatus : *(uchar*)&EaResponse.rcvrStatus);
-
+        printf("%d %X", totalBadSNR / notLocked, numChannels < 8 ? *(uchar*)&BaResponse.rcvrStatus : *(uchar*)&EaResponse.rcvrStatus);
+        printf(notLocked < numChannels ? "\n" : "\r");
 #if 0
         // "The signal strength value is meaningless when the channel tracking mode is zero."  *****
         // kick out worst signal, replace with channel thrown out longest ago
@@ -939,8 +967,7 @@ int main() {
         if (++oldPtr >= 24)
           oldPtr = 0;
 #endif
-      } else printf("Read %d", bytesRead);
-      printf("\n");
+      } else printf("Read %d  ", bytesRead);
       Sleep(5000); // * (32 - 8) = 24 satellites to check
     }
   } while (_getch() != 27);  // Escape
@@ -949,7 +976,6 @@ int main() {
 
   CloseHandle(hCom);
 }
-
 
 
 
