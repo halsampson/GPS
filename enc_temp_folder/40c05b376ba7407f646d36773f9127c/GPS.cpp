@@ -294,7 +294,7 @@ void setField(int field, char* line) {
 
 void almanacPage(almData& almd);
 
-int convertAlmanac(const char* almPath = "../../../Desktop/Tools/modules/GPS/almanac.yuma.week0149.147456.txt") {  // returns GPS week 
+int convertAlmanac(const char* almPath) {  // returns GPS week 
   FILE* almf = fopen(almPath, "rt");
   if (!almf) {
     almPath = "almanac.yuma.week0149.147456.txt";
@@ -569,9 +569,8 @@ void almanacPage(almData& almd) {
 
 #if 1
 
-void sendAlmanac() {
-  int week = convertAlmanac();
-  // int week = convertAlmanac("../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0860.1996.txt");  // testing
+void sendAlmanac(const char* almanacPath) {
+  int week = convertAlmanac(almanacPath);
   uchar toa = almMsg.data.toa;  // same as others
 
   // svConfig codes 0 = no info
@@ -752,7 +751,7 @@ void weekRollovers() {  // no need
 #endif
 
 
-bool forceAlmanacUpdate;
+const char* newAlmanacPath;
 
 void updateAlmanac() {  
   char almStatus[23];
@@ -768,9 +767,9 @@ void updateAlmanac() {
     fclose(alm);
     printf("\n");
 #endif
-    if (!forceAlmanacUpdate) return;
+    if (!newAlmanacPath) return;
   } 
-  sendAlmanac();
+  sendAlmanac(newAlmanacPath);
 
   Sleep(1000);
   if (!rxRdy()) {
@@ -900,7 +899,8 @@ void initOncore() {
 
 
 int main(int argc, char** argv) {
-  forceAlmanacUpdate = argc > 1 && argv[1][0] == 'f';
+  if (argc > 1)
+    newAlmanacPath = argv[1];
 
 #if 1
   if (!openSerial("COM34", 9600))  // default on power-cycle
@@ -1169,7 +1169,16 @@ int main() {
   }
 }
 
-
+void chkResponse() {
+  while (!_kbhit()) {
+    ReadFile(hCom, line, 200, &bytesRead, NULL);
+    if (bytesRead) {
+      line[bytesRead] = 0;
+      printf("%s\n", line);
+    }
+  }
+  _getch();
+}
 
 void nmea() {
   openSerial("COM6", 4800);
@@ -1187,25 +1196,14 @@ void nmea() {
   sprintf(initNav, "PSRF101,-2694294,-4303469,3847444,91446,%d,%d,12,17", tow, week);
   nmeaCmd(initNav);
 
-
   // TODO: set static navigation Msg 143 (freeze on low velocity)?
 
   exit(0);
 
-
   while (1) {
     nmeaCmd("PSRF100,0,4800,8,1,0"); // switch from NMEA to Sirf binary; send on split pin 1a
-
-    while (!_kbhit()) {
-      ReadFile(hCom, line, 200, &bytesRead, NULL);
-      if (bytesRead) {
-        line[bytesRead] = 0;
-        printf("%s\n", line);
-      }
-    }
-    _getch();
+    chkResponse();
   }
-
 
   // ReadFile(hCom, line, sizeof line, &bytesRead, NULL);  // flush
 
@@ -1223,48 +1221,15 @@ void nmea() {
       nmeaCmd("PSRF103,04,00,05,01");
       nmeaCmd("PSRF103,05,00,05,01");
 
-      while (!_kbhit()) {
-        ReadFile(hCom, line, sizeof line, &bytesRead, NULL);
-        if (bytesRead) {
-          line[bytesRead] = 0;
-          printf("%s\n", line);
-        }
-      }
-      _getch();
-
-    
-      while (!_kbhit()) {
-        ReadFile(hCom, line, sizeof line, &bytesRead, NULL);
-        if (bytesRead) {
-          line[bytesRead] = 0;
-          printf("%s\n", line);
-        }
-      }
-      _getch();
+      chkResponse();
     }
 
-
-  while (!_kbhit()) {
-    ReadFile(hCom, line, sizeof line, &bytesRead, NULL);
-    if (bytesRead) {
-      line[bytesRead] = 0;
-      printf("%s\n", line);
-    }
-  }
-  _getch();
+  chkRespnse();
 
   // chk SW version
   // nmeaCmd("PSRF103,06,00,00,01");
   // nmeaCmd("PSRF103,08,00,00,01");
-
-  while (!_kbhit()) {
-    ReadFile(hCom, line, sizeof line, &bytesRead, NULL);
-    if (bytesRead) {
-      line[bytesRead] = 0;
-      printf("%s\n", line);
-    }
-  }
-  _getch();
+  // chkRespnse();
 
   nmeaCmd("PSRF100,0,4800,8,1,0"); // switch from NMEA to Sirf binary; send on split pin 1a
 
@@ -1286,42 +1251,5 @@ void nmea() {
   fclose(sirf);
   CloseHandle(hCom);
 }
-
-/*
-Raw Sirf Almanac data -- week 147:
-
-A0 A2 00 1E 0E 01 25 01 41 5D 02 24 1C CA FD 61 00 A1 0D 07 B7 42 DF 23 EC 52 87 6F 27 39 FF AC C1 60 0B 4D B0 B3 
-A0 A2 00 1E 0E 02 25 01 42 A9 5A 24 0E AC FD 54 00 A1 0D 24 B3 A1 36 C5 15 53 8D 87 EC AA 00 1A 55 97 0A E3 B0 B3
-A0 A2 00 1E 0E 03 25 01 43 1F C6 24 13 97 FD 50 00 A1 0D 11 E1 73 9C 27 39 84 58 40 0F F1 FF 71 6B 9D 0B 1D B0 B3
-A0 A2 00 1E 0E 04 25 01 44 0D E3 24 0C 58 FD 51 00 A1 0C D1 0D 7E 95 82 E3 7B D0 5D 02 E7 00 20 BD 2C 0A DF B0 B3
-A0 A2 00 1E 0E 05 25 01 45 30 21 24 0B 18 FD 43 00 A1 0C DC DF CF 4B 29 25 07 F3 7C FD F6 00 1B E2 B9 0B 45 B0 B3
-A0 A2 00 1E 0E 06 25 01 46 15 E9 0F 1C 60 FD 63 00 A1 0C FB B6 F3 9A D8 82 48 96 12 0A 19 00 6C F0 2E 0B 4B B0 B3
-A0 A2 00 1E 0E 07 25 01 47 7F 0A 0F 05 59 FD 4B 00 A1 0D 28 37 0A 24 A2 92 FE 6D 12 FB 28 00 2D DE 0D 08 E7 B0 B3
-A0 A2 00 1E 0E 08 25 01 48 3B 6D 0F 0E BF FD 49 00 A1 0D 58 8B 4D ED 03 F2 51 E4 EE 20 F8 00 19 64 EC 0B B2 B0 B3
-A0 A2 00 1E 0E 09 25 01 49 12 AB 0F 07 CA FD 4A 00 A1 0C 97 0B 5E 53 4C 43 DC F3 25 3B D1 00 0D FC F7 0A F9 B0 B3
-A0 A2 00 1E 0E 0A 25 01 4A 3D 61 0F 13 77 FD 47 00 A1 0D 02 E1 5D BF 99 55 EA 35 AF A9 D7 FF A1 C4 B5 0D 05 B0 B3
-A0 A2 00 1E 0E 0B 25 01 4B 02 4C 0F 0C 8C FD 4C FF A1 0D C3 B9 14 B5 74 18 77 DF AD FB F3 00 85 36 72 0C 64 B0 B3
-A0 A2 00 1E 0E 0C 25 01 4C 46 F4 0F 12 35 FD 43 00 A1 0C 6E 64 62 21 32 B0 C6 52 52 07 EA FF C6 12 39 0A AB B0 B3
-A0 A2 00 1E 0E 0D 25 01 4D 2F 80 24 11 2E FD 57 00 A1 0C FD 11 8F 7E 27 36 26 CC 50 07 21 00 5B A8 1F 08 A5 B0 B3
-A0 A2 00 1E 0E 0E 25 01 4E 0B 93 24 07 60 FD 3C 00 A1 0C C0 63 15 B6 7B 2F EF 53 F0 51 F5 FF EC 07 7D 0C 1E B0 B3
-A0 A2 00 1E 0E 0F 25 01 4F 72 12 24 F8 0E FD 30 00 A1 0D 63 07 07 75 2B C6 3C BB 44 1D F4 00 39 A5 B8 09 D4 B0 B3
-A0 A2 00 1E 0E 10 25 01 50 68 4D 0F 12 2F FD 43 00 A1 0C 60 65 24 58 1C BC 3D 06 C5 54 C2 FF FC B3 EB 0B 56 B0 B3
-A0 A2 00 1E 0E 11 25 01 51 6F C9 0F 18 95 FD 59 00 A1 0D AD 8E A2 5A C2 D8 77 E1 1F 3C 4A 00 3D 43 3C 0B 18 B0 B3
-A0 A2 00 1E 0E 12 25 01 52 11 2A 0F 12 36 FD 54 00 A1 0C 9E B7 9C D0 7E 8E 93 90 55 69 20 FF C8 CD D4 0C 5E B0 B3
-A0 A2 00 1E 0E 13 25 01 53 49 52 0F 17 C3 FD 58 00 A1 0D 1C 90 76 63 51 AD E9 43 3B F2 0F 00 26 C4 51 0A 47 B0 B3
-A0 A2 00 1E 0E 14 25 01 54 2A 9A 0F FF 73 FD 2B 00 A1 0D 74 DB 32 E8 7F 4F 6C B2 26 77 43 00 19 5A 8C 0A EB B0 B3
-A0 A2 00 1E 0E 15 25 01 55 C9 52 0F 0A EA FD 51 00 A1 0C 50 B3 97 FF D6 D2 50 E8 64 DB 14 00 17 2B 51 0C 16 B0 B3
-A0 A2 00 1E 0E 16 25 01 56 69 4C 0F 0C 70 FD 53 00 A1 0C D5 0F 7D 81 B3 9C AC DB CB 67 1B 00 53 4F C7 0B 4B B0 B3
-A0 A2 00 1E 0E 17 25 01 57 10 2B 0F 10 3C FD 43 00 A1 0D 2C E0 5A F4 78 45 DB 6B A9 3E 00 FF F3 86 B5 0B 97 B0 B3
-A0 A2 00 1E 0E 18 25 01 58 64 F8 0F FA 9B FD 3F 00 A1 0D 23 33 AC 4A 20 DC 20 94 65 C6 24 00 05 2F 8C 0A 99 B0 B3
-A0 A2 00 1E 0E 19 25 01 59 55 CD 24 09 F9 FD 3F 00 A1 0D 4B 61 3B 97 27 E4 AB 47 5C 10 25 00 40 95 6C 0A 25 B0 B3
-A0 A2 00 1E 0E 1A 25 01 5A 38 26 24 FD 78 FD 2F 00 A1 0D 1E 5F 52 ED 0E E2 C6 2C D1 3A 17 00 38 44 09 09 BE B0 B3
-A0 A2 00 1E 0E 1B 25 01 5B 53 64 24 14 68 FD 4C 00 A1 0C D3 8C 10 84 19 E5 6D E2 02 5F 0E 00 A9 3A EF 0A 78 B0 B3
-A0 A2 00 1E 0E 1C 06 C1 5C 9C AD 90 18 87 FD 53 00 A1 0D 50 CE 95 09 C4 E8 B0 78 67 CD 63 00 0E 3B 99 0C CC B0 B3
-A0 A2 00 1E 0E 1D 25 01 5D 0E CB 0F 19 E5 FD 5B 00 A1 0D B1 8F 29 D4 5C 54 B9 E7 B0 87 C1 FF F1 9A 50 0D F9 B0 B3
-A0 A2 00 1E 0E 1E 25 01 5E 2C EF 0F FB AD FD 3E 00 A1 0C 39 37 94 90 90 04 96 6E 5D CB BC FF FF 7E D3 0D C9 B0 B3
-A0 A2 00 1E 0E 1F 25 01 5F 55 AA 0F 08 1A FD 51 00 A1 0D 14 37 C6 8C 0F 3C 7C 5A 9B 20 EA FF F7 BD 52 0B 46 B0 B3
-A0 A2 00 1E 0E 20 25 01 60 2D 5F 0F 0A 4E FD 4E 00 A1 0D C2 0B D2 BC 9F D0 A4 FD 90 B8 F7 FF D9 49 B1 0E 1C B0 B3
-*/
 
 #endif

@@ -294,7 +294,7 @@ void setField(int field, char* line) {
 
 void almanacPage(almData& almd);
 
-int convertAlmanac(const char* almPath = "../../../Desktop/Tools/modules/GPS/almanac.yuma.week0149.147456.txt") {  // returns GPS week 
+int convertAlmanac(const char* almPath) {  // returns GPS week 
   FILE* almf = fopen(almPath, "rt");
   if (!almf) {
     almPath = "almanac.yuma.week0149.147456.txt";
@@ -569,9 +569,8 @@ void almanacPage(almData& almd) {
 
 #if 1
 
-void sendAlmanac() {
-  int week = convertAlmanac();
-  // int week = convertAlmanac("../../../Desktop/Tools/Modules/GPS/almanac.yuma.week0860.1996.txt");  // testing
+void sendAlmanac(const char* almanacPath) {
+  int week = convertAlmanac(almanacPath);
   uchar toa = almMsg.data.toa;  // same as others
 
   // svConfig codes 0 = no info
@@ -752,7 +751,7 @@ void weekRollovers() {  // no need
 #endif
 
 
-bool forceAlmanacUpdate;
+const char* newAlmanacPath;
 
 void updateAlmanac() {  
   char almStatus[23];
@@ -768,9 +767,9 @@ void updateAlmanac() {
     fclose(alm);
     printf("\n");
 #endif
-    if (!forceAlmanacUpdate) return;
+    if (!newAlmanacPath) return;
   } 
-  sendAlmanac();
+  sendAlmanac(newAlmanacPath);
 
   Sleep(1000);
   if (!rxRdy()) {
@@ -900,7 +899,8 @@ void initOncore() {
 
 
 int main(int argc, char** argv) {
-  forceAlmanacUpdate = argc > 1 && argv[1][0] == 'f';
+  if (argc > 1)
+    newAlmanacPath = argv[1];
 
 #if 1
   if (!openSerial("COM34", 9600))  // default on power-cycle
@@ -955,7 +955,7 @@ int main(int argc, char** argv) {
             worstCh = s;
           }
         }
-        printf("%d %X", totalBadSNR / notLocked, numChannels < 8 ? *(uchar*)&BaResponse.rcvrStatus : *(uchar*)&EaResponse.rcvrStatus);
+        printf("%d %X ", totalBadSNR / notLocked, numChannels < 8 ? *(uchar*)&BaResponse.rcvrStatus : *(uchar*)&EaResponse.rcvrStatus);
         printf(notLocked < numChannels ? "\n" : "\r");
 #if 0
         // "The signal strength value is meaningless when the channel tracking mode is zero."  *****
