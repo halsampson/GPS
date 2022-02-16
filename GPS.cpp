@@ -1059,35 +1059,18 @@ int main(int argc, char** argv) {
         int worstSignal = 256;
         int worstCh, worstSV;
         int totalBadSNR = 0;
-        int notLocked = 0;
+        int locked = 0;
         for (int s = 0; s < numChannels; ++s) {
           if (EaResponse.sat[s].trackMode) {
-            printf("%2d: %d+%3d  ", EaResponse.sat[s].satID, EaResponse.sat[s].trackMode, EaResponse.sat[s].SNR);
-          }
-          else {
-            ++notLocked;
+            if (!locked++) printf("\n");
+            printf("%2d-%d ", EaResponse.sat[s].SNR, EaResponse.sat[s].trackMode);
+          } else {
             totalBadSNR += EaResponse.sat[s].SNR;
           }
-          if (EaResponse.sat[s].SNR < worstSignal) {  // no signal -> 100 ??
-            worstSignal = EaResponse.sat[s].SNR;
-            worstSV = EaResponse.sat[s].satID;
-            worstCh = s;
-          }
         }
-        printf("%d %X ", totalBadSNR / notLocked, numChannels < 8 ? *(uchar*)&BaResponse.rcvrStatus : *(uchar*)&EaResponse.rcvrStatus);
-        printf(notLocked < numChannels ? "\n" : "\r");
-#if 0
-        // "The signal strength value is meaningless when the channel tracking mode is zero."  *****
-        // kick out worst signal, replace with channel thrown out longest ago
-        char satSelect[16];
-        sprintf(satSelect, "Ai%c%c", worstCh + 1, onDeck[oldPtr]);
-        motoCmd(satSelect, 4);
-        onDeck[oldPtr] = worstSV;
-        if (++oldPtr >= 24)
-          oldPtr = 0;
-#endif
+        if (!locked)
+          printf("%d ", totalBadSNR / numChannels);
       }
-      else printf("Read %d  ", bytesRead);
       Sleep(5000); // * (32 - 8) = 24 satellites to check
     }
   } while (getchar() != 27);  // Escape
