@@ -201,6 +201,9 @@ int readSerial(void* ptr, int count, uchar timeout = 255) {
   return bytesRead;
 }
 
+void setResponseMs(int ms) {
+  //tattr.c_cc[VTIME];
+}
 
 int rxRdy(void) {
   int available;
