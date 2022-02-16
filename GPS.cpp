@@ -174,8 +174,8 @@ int _kbhit() {
 #define setResponseMs(a)
 
 int openSerial(const char* portName, int baudRate = 9600) {
-  system("stty -F /dev/ttyACM0 -echo");
-  return open("/dev/ttyACM0", O_RDWR);
+  system("stty -F /dev/ttyUSB0 -echo");
+  return open("/dev/ttyUSB0", O_RDWR);
 }
 
 int rxRdy(void) {
@@ -304,10 +304,10 @@ struct {
 } alm4p25 = { 127 & 0x3F, 1 };
 
 
+almData  alm;
+
 static union {
-  almData  alm;
   uchar    almWord[8][3];
-  ushort   almShort[14];
 };
 
 
@@ -381,7 +381,7 @@ void almanacPage(almData& almd);
 int convertAlmanac(const char* almPath) {  // returns GPS week 
   FILE* almf = fopen(almPath, "rt");
   if (!almf) {
-    almPath = "almanac.yuma.week0149.147456.txt";
+    almPath = "almanac.yuma.week0149.405504.txt";
     almf = fopen(almPath, "rt");
   }
   printf("Almanac %s\n   Sat\r", almPath);
@@ -998,7 +998,7 @@ int main(int argc, char** argv) {
   setComm(9600);
 #endif
 
-  WriteFile(hCom, NULL, 1, NULL, NULL); // to set baud rate?
+  WriteFile(hCom, "/000", 1, NULL, NULL); // to set baud rate?
   setResponseMs(200);
   ReadFile(hCom, response, sizeof response, &bytesRead, NULL);  // flush
 
