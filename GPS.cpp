@@ -160,18 +160,18 @@ int _kbhit() {
   return 1;
 }
 
-int openSerial(const char *ptyName = "/dev/ttyUSB0") {
-  hCom = open(ptyName, O_RDWR | O_NOCTTY);
+int openSerial(const char *ttyDevName = "/dev/ttyUSB0", int baudIdx = B9600) {
+  hCom = open(ttyDevName, O_RDWR | O_NOCTTY);
+  if (hCom <= 0) {
+    printf("Can't open %s\nchmod 777 %s\nsudo adduser $USER dialout\n", ttyDevName, ttyDevName);
+    exit(-53);
+  }
 
   termios tattr;
   tcgetattr(hCom, &tattr);
-  cfsetspeed(&tattr, B9600);
+  cfsetspeed(&tattr, baudIdx);
   cfmakeraw(&tattr);
   tattr.c_cflag |= CREAD | CLOCAL;
-
-  // read with timeout
-  tattr.c_cc[VMIN] = 1;
-  tattr.c_cc[VTIME] = 100; // in tenths of a second
   tcsetattr(hCom, TCSANOW, &tattr);
 
   tcflush(hCom, TCIFLUSH);
@@ -179,33 +179,39 @@ int openSerial(const char *ptyName = "/dev/ttyUSB0") {
   return hCom;
 }
 
-int readSerial(void* ptr, int count, uchar timeout = 255) {
+int rxRdy(void) {
+  int available;
+  ioctl(hCom, FIONREAD, &available);
+  return available;
+}
+
+int readSerial(void* ptr, int count) {
+  // initial timeout then between chars timeout
+  int initialTimeout = 100;  //tenths of seconds
+  while (!rxRdy() && --initialTimeout) usleep(100 * 1000);
+  if (initialTimeout <= 0) return 0;
+
   int bytesRead = 0;
   static uchar lastCount;
   uchar* cPtr = (uchar*)ptr;
   while (count > 0) {
     int thisCount = count > 64 ? 64 : count;
-    if (thisCount != lastCount) {
-      lastCount = thisCount;
-      termios tattr;
-      tcgetattr(hCom, &tattr);
-      tattr.c_cc[VMIN] = count; // get <= 64 bytes from USB;  less from FIFO
-      tattr.c_cc[VTIME] = timeout; // in tenths of a second
-      tcsetattr(hCom, TCSANOW, &tattr);
-    }
+    termios tattr;
+    tcgetattr(hCom, &tattr);
+    tattr.c_cc[VMIN] = thisCount; // get <= 64 bytes from USB;  less from FIFO
+    tattr.c_cc[VTIME] = 20; // in tenths of a second, between characters
+    tcsetattr(hCom, TCSANOW, &tattr);
+
     int thisBytesRead = read(hCom, cPtr, thisCount);
+    if (!thisBytesRead) { // timeout here shouldn't happen
+      printf("Short reply\n");
+      return bytesRead;
+    }
     cPtr += thisBytesRead;
     bytesRead += thisBytesRead;
     count -= thisBytesRead;
   }  
   return bytesRead;
-}
-
-
-int rxRdy(void) {
-  int available;
-  ioctl(hCom, FIONREAD, &available);
-  return available;
 }
 
 #endif
@@ -501,14 +507,14 @@ bool motoCmd(const void* cmd, int len, int responseLen = -1, void* pResponse = r
 
     if ((int)bytesRead == responseLen
       && *cpResp == '@'
-      //&& cpResp[bytesRead - 1] == '\n'
+      && cpResp[bytesRead - 1] == '\n'
       )
       return true;
 
-    printf("%s -> ", (char*)cmd);
+    printf("Error %s -> ", (char*)cmd);
     fwrite(pResponse, 1, bytesRead, stdout);
     printf("\n");
-    Sleep(1000);
+    Sleep(1000); // before retry
   }
 }
 
@@ -625,7 +631,7 @@ void setSubframeAndPage(int id) {
   }
   almMsg.page = page;
 
-  printf("\r%2d\r", id);
+  printf("\r%2d\r", id); fflush(stdout);
 }
 
 void almanacPage(almData& almd) {
@@ -971,9 +977,8 @@ void setTime() {  // set date / time
   pTime = gmtime(&rtime);
   sprintf(cmd, "Aa%c%c%c", pTime->tm_hour, pTime->tm_min, pTime->tm_sec);
   motoCmd(cmd, 5);
-
   motoCmd("Cg\001", 3); // start clock, idle off position fix mode (for VP units)
-  Sleep(500);
+  Sleep(5000);  // ?else drops input while starting up??
 
   motoCmd("Ac\377\377\377\377", 6);  // check date
   printf("GMT date set: %d/%d/%d\n", response[4], response[5], response[6] * 256 + response[7]);
@@ -993,9 +998,9 @@ void initOncore() {
   printf("GMT date was: %d/%d/%d\n", response[4], response[5], response[6] * 256 + response[7]);
 #endif
 
-  motoCmd(numChannels < 8 ? "Ca" : "Fa", 2, 9);  //self test
-  if (response[4] || response[5])
-    printf("Self test fail\n");
+  printf("Self test ");
+  motoCmd(numChannels < 8 ? "Ca" : "Fa", 2, 9);  //self test - 5 seconds
+  printf("%s\n", response[4] || response[5] ? "fail" : "OK");
 
   updateAlmanac();
   setPosition();
@@ -1010,7 +1015,6 @@ void initOncore() {
   else motoCmd(cmd_En, sizeof cmd_En, sizeof En_status);  // enable 1 PPS
 // printf(" %d %d %d %d", En_status.pulseStatus, En_status.solnStatus, En_status.RAIM_Status, En_status.negSawtooth);
 }
-
 
 int main(int argc, char** argv) {
   if (argc > 1)
@@ -1032,7 +1036,7 @@ int main(int argc, char** argv) {
 
   motoCmd("Cj", 2, 294);
   response[bytesRead] = 0;
-  printf("%s\n", response + 4); // ID
+  printf("%s", response + 4); // ID
   numChannels = strstr((char*)response, "8_CH") ? 8 : 6;
 
 #if 1
@@ -1044,6 +1048,7 @@ int main(int argc, char** argv) {
 
   motoCmd("Aa\377\377\377", 5);  // check time
   printf("%02d:%02d:%02d GMT\n", response[4], response[5], response[6]);
+
   printf("\n");
 
   // watchBroadcast();
