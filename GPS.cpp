@@ -525,9 +525,11 @@ bool motoCmd(const void* cmd, int len, int responseLen = -1, void* pResponse = r
     }
 #endif
 
+    char* cpResp = (char*)pResponse;
+
     if ((int)bytesRead == responseLen
-      && *(char*)pResponse == '@'
-      && ((char*)pResponse)[bytesRead - 1] == '\n')
+      && *cpResp == '@'
+      && cpResp[bytesRead - 1] == '\n')
       return true;
 
     printf("%s -> ", (char*)cmd);
