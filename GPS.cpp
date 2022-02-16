@@ -12,7 +12,7 @@
   #define _byteswap_ulong  __builtin_bswap32
   #define _byteswap_ushort __builtin_bswap16
   #define  DWORD uint
-  #define Sleep(ms) sleep(ms/1000)
+  #define Sleep(ms) usleep(ms * 1000)
 
   #define HANDLE int
   #define WriteFile(stream, ptr, count, written, overlap) write(stream, ptr, count)
@@ -135,88 +135,68 @@ void setComm(int baudRate, bool dtrEnable = true, bool rtsEnable = true) {
 #define O_NONBLOCK 0x400
 #endif
 
-struct termios setAttr() {
-  struct termios oldt, newt;
-  tcgetattr(STDIN_FILENO, &oldt);
-  newt = oldt;
-  newt.c_lflag &= ~(ICANON | ECHO);
-  tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-  return oldt;
-}
-
-int _getch() {
-  struct termios oldt = setAttr();
-
-  int ch = getchar();
-  tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-  return ch;
-}
-
 int _kbhit() {
-  struct termios oldt = setAttr();
+  static bool set;
+  if (!set) {
+    termios tattr;
+    tcgetattr(STDIN_FILENO, &tattr);
+    tattr.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &tattr);
 
-  int oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
-  fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
+    fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL, 0) | O_NONBLOCK);
+  }
 
   int ch = getchar();
+  if (ch == EOF) 
+    return 0;
 
-  tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-  fcntl(STDIN_FILENO, F_SETFL, oldf);
-
-  if (ch != EOF) {
-    ungetc(ch, stdin);
-    return 1;
-  }
-  return 0;
+  ungetc(ch, stdin);
+  return 1;
 }
 
-int tty_open(const char *ptyName) {
-  int UART = open(ptyName, O_RDWR | O_NOCTTY);
-  if (UART == -1) {
-      perror("error opening terminal");
-      close(UART);
-      return -1;
-    }
+int openSerial(const char *ptyName = "/dev/ttyUSB0") {
+  hCom = open(ptyName, O_RDWR | O_NOCTTY);
 
-  struct termios ttyOrig;
-  if(tcgetattr(UART, &ttyOrig) == -1) {
-      perror("unable to get tty attributes");
-      close(UART);
-      return -1;
-    }
-
-  cfsetispeed(&ttyOrig, B9600);
-  cfsetospeed(&ttyOrig, B9600);
-  cfmakeraw(&ttyOrig);
-
-  ttyOrig.c_cflag |= CREAD | CLOCAL;
+  termios tattr;
+  tcgetattr(hCom, &tattr);
+  cfsetspeed(&tattr, B9600);
+  cfmakeraw(&tattr);
+  tattr.c_cflag |= CREAD | CLOCAL;
 
   // read with timeout
-  ttyOrig.c_cc[VMIN] = 1;
-  ttyOrig.c_cc[VTIME] = 100; // in tenths of a second
+  tattr.c_cc[VMIN] = 1;
+  tattr.c_cc[VTIME] = 100; // in tenths of a second
+  tcsetattr(hCom, TCSANOW, &tattr);
 
-  if (tcsetattr(UART, TCSANOW, &ttyOrig) == -1) {
-      perror("error setting terminal attributes");
-      close(UART);
-      return -1;
-  }
+  tcflush(hCom, TCIFLUSH);
 
-  tcflush(UART, TCIFLUSH);
-  tcdrain(UART);
+  return hCom;
+}
 
-  return UART;
+int readSerial(void* ptr, int count, uchar timeout = 255) {
+  int bytesRead = 0;
+  static uchar lastCount;
+  uchar* cPtr = (uchar*)ptr;
+  while (count > 0) {
+    int thisCount = count > 64 ? 64 : count;
+    if (thisCount != lastCount) {
+      lastCount = thisCount;
+      termios tattr;
+      tcgetattr(hCom, &tattr);
+      tattr.c_cc[VMIN] = count; // get <= 64 bytes from USB;  less from FIFO
+      tattr.c_cc[VTIME] = timeout; // in tenths of a second
+      tcsetattr(hCom, TCSANOW, &tattr);
+    }
+    int thisBytesRead = read(hCom, cPtr, thisCount);
+    cPtr += thisBytesRead;
+    bytesRead += thisBytesRead;
+    count -= thisBytesRead;
+  }  
+  return bytesRead;
 }
 
 void setResponseMs(int ms) {
-  if (ms >= 10000)
-    system("stty -F /dev/ttyUSB0 time 100");
-}
-
-HANDLE openSerial(const char* portName, int baudRate = 9600) {
-  return hCom = tty_open("/dev/ttyUSB0");
-
-  system("stty -F /dev/ttyUSB0 9600 cs8 -cstopb -parity -icanon min 0 time 10");
-  return hCom = open("/dev/ttyUSB0", O_RDWR);
+  //tattr.c_cc[VTIME];
 }
 
 int rxRdy(void) {
@@ -488,18 +468,7 @@ bool motoCmd(const void* cmd, int len, int responseLen = -1, void* pResponse = r
     if (!responseLen) return true; // no response
 
     if (responseLen < 0) responseLen = 2 + len + 3;
-
-    uchar* inp = (uchar*)pResponse;
-    int bytesRemaining = responseLen;
-    int timeout = responseLen;
-    bytesRead = 0;
-    do {
-      DWORD bytesThisRead = 0;
-      ReadFile(hCom, inp, bytesRemaining, &bytesThisRead, NULL);
-      inp += bytesThisRead;
-      bytesRead += bytesThisRead;
-      bytesRemaining -= bytesThisRead;
-    } while (bytesRead < responseLen && timeout--);
+    bytesRead = readSerial(pResponse, responseLen);
 
     if (((char*)pResponse)[2] == 'Q') {  // QX after power cycle
       printf("Q");
@@ -529,7 +498,8 @@ bool motoCmd(const void* cmd, int len, int responseLen = -1, void* pResponse = r
 
     if ((int)bytesRead == responseLen
       && *cpResp == '@'
-      && cpResp[bytesRead - 1] == '\n')
+      //&& cpResp[bytesRead - 1] == '\n'
+      )
       return true;
 
     printf("%s -> ", (char*)cmd);
@@ -1043,6 +1013,10 @@ int main(int argc, char** argv) {
   if (argc > 1)
     newAlmanacPath = argv[1];
 
+#ifndef _MSC_VER
+  openSerial();
+#else
+
 #if 1
   if (!openSerial("COM34", 9600))  // default on power-cycle
     if (!openSerial("COM3", 9600)) exit(-1); // default on power-cycle
@@ -1051,12 +1025,7 @@ int main(int argc, char** argv) {
   WriteFile(hCom, "$PMOTG,FOR,0*2A", 15, NULL, NULL);
   setComm(9600);
 #endif
-
-  WriteFile(hCom, "\000", 1, NULL, NULL); // to set baud rate?
-  setResponseMs(200);
-  //ReadFile(hCom, response, sizeof response, &bytesRead, NULL);  // flush
-
-  setResponseMs(10000);
+#endif
 
   motoCmd("Cj", 2, 294);
   response[bytesRead] = 0;
@@ -1113,7 +1082,7 @@ int main(int argc, char** argv) {
       else printf("Read %d  ", bytesRead);
       Sleep(5000); // * (32 - 8) = 24 satellites to check
     }
-  } while (_getch() != 27);  // Escape
+  } while (getchar() != 27);  // Escape
 
   motoCmd("Cg\000", 3);  // restart in idle mode
 
@@ -1307,7 +1276,7 @@ int main() {
       printf("%d\n", numSeen);
 
       if (numSeen >= MaxSeen) break;
-      if (_getch() == 27) break;
+      if (getchar() == 27) break;
     }
   }
 }
@@ -1320,7 +1289,7 @@ void chkResponse() {
       printf("%s\n", line);
     }
   }
-  _getch();
+  getchar();
 }
 
 void nmea() {
