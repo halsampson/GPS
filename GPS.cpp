@@ -12,12 +12,12 @@
   #define _byteswap_ulong  __builtin_bswap32
   #define _byteswap_ushort __builtin_bswap16
   #define  DWORD uint
-  #define Sleep sleep
+  #define Sleep(ms) sleep(ms/1000)
 
-  #define HANDLE FILE*
-  #define WriteFile(stream, ptr, count, written, overlap) fwrite(ptr, 1, count, stream)
-  #define ReadFile(stream, ptr, count, bytesRead, overlapped)  *bytesRead = fread(ptr, 1, count, stream)
-  #define CloseHandle fclose
+  #define HANDLE int
+  #define WriteFile(stream, ptr, count, written, overlap) write(stream, ptr, count)
+  #define ReadFile(stream, ptr, count, bytesRead, overlapped)  *bytesRead = read(stream, ptr, count)
+  #define CloseHandle close
 #endif
 
 #include <stdlib.h>
@@ -60,7 +60,7 @@ ushort bigEnd(ushort le) {
   return _byteswap_ushort(le);
 }
 
-HANDLE hCom = NULL;
+HANDLE hCom;
 
 #ifdef _MSC_VER
 
@@ -170,17 +170,58 @@ int _kbhit() {
   return 0;
 }
 
+int tty_open(const char *ptyName) {
+  int UART = open(ptyName, O_RDWR | O_NOCTTY);
+  if (UART == -1) {
+      perror("error opening terminal");
+      close(UART);
+      return -1;
+    }
 
-#define setResponseMs(a)
+  struct termios ttyOrig;
+  if(tcgetattr(UART, &ttyOrig) == -1) {
+      perror("unable to get tty attributes");
+      close(UART);
+      return -1;
+    }
 
-int openSerial(const char* portName, int baudRate = 9600) {
-  system("stty -F /dev/ttyUSB0 -echo");
-  return open("/dev/ttyUSB0", O_RDWR);
+  cfsetispeed(&ttyOrig, B9600);
+  cfsetospeed(&ttyOrig, B9600);
+  cfmakeraw(&ttyOrig);
+
+  ttyOrig.c_cflag |= CREAD | CLOCAL;
+
+  // read with timeout
+  ttyOrig.c_cc[VMIN] = 1;
+  ttyOrig.c_cc[VTIME] = 100; // in tenths of a second
+
+  if (tcsetattr(UART, TCSANOW, &ttyOrig) == -1) {
+      perror("error setting terminal attributes");
+      close(UART);
+      return -1;
+  }
+
+  tcflush(UART, TCIFLUSH);
+  tcdrain(UART);
+
+  return UART;
+}
+
+void setResponseMs(int ms) {
+  if (ms >= 10000)
+    system("stty -F /dev/ttyUSB0 time 100");
+}
+
+HANDLE openSerial(const char* portName, int baudRate = 9600) {
+  return hCom = tty_open("/dev/ttyUSB0");
+
+  system("stty -F /dev/ttyUSB0 9600 cs8 -cstopb -parity -icanon min 0 time 10");
+  return hCom = open("/dev/ttyUSB0", O_RDWR);
 }
 
 int rxRdy(void) {
   int available;
-  ioctl(fileno(hCom), FIONREAD, &available);
+  ioctl(hCom, FIONREAD, &available);
   return available;
 }
 
@@ -447,7 +488,18 @@ bool motoCmd(const void* cmd, int len, int responseLen = -1, void* pResponse = r
     if (!responseLen) return true; // no response
 
     if (responseLen < 0) responseLen = 2 + len + 3;
-    ReadFile(hCom, pResponse, responseLen, &bytesRead, NULL);
+
+    uchar* inp = (uchar*)pResponse;
+    int bytesRemaining = responseLen;
+    int timeout = responseLen;
+    bytesRead = 0;
+    do {
+      DWORD bytesThisRead = 0;
+      ReadFile(hCom, inp, bytesRemaining, &bytesThisRead, NULL);
+      inp += bytesThisRead;
+      bytesRead += bytesThisRead;
+      bytesRemaining -= bytesThisRead;
+    } while (bytesRead < responseLen && timeout--);
 
     if (((char*)pResponse)[2] == 'Q') {  // QX after power cycle
       printf("Q");
@@ -998,9 +1050,9 @@ int main(int argc, char** argv) {
   setComm(9600);
 #endif
 
-  WriteFile(hCom, "/000", 1, NULL, NULL); // to set baud rate?
+  WriteFile(hCom, "\000", 1, NULL, NULL); // to set baud rate?
   setResponseMs(200);
-  ReadFile(hCom, response, sizeof response, &bytesRead, NULL);  // flush
+  //ReadFile(hCom, response, sizeof response, &bytesRead, NULL);  // flush
 
   setResponseMs(10000);
 
@@ -1071,7 +1123,7 @@ int main(int argc, char** argv) {
 #else // Sirf  GPS-500, VK16E
 
 
-// Initialize Data Source – Message ID 128
+// Initialize Data Source ï¿½ Message ID 128
 
 /*
 If Nav Lib data are enabled, the resulting messages are enabled:
