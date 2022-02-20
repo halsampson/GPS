@@ -781,6 +781,9 @@ void watchBroadcast() {  // no response
 
 // TODO: struct for En
 
+// TRAIM requires As then At Position Set/ Hold
+// @@At02 automatic site survey (M12+ only?)  - can check Ea msg status bit 4
+
 uchar cmd_En[] = { 'E', 'n', 0, 1, 0, 10, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // PPS on when lock to any satellite; TRAIM if possible; // Bn for 6 ch
 
 struct {   // otaapnnnmdyyhmspysreen sffffsffffsffffsffffsffffsffffsffffsffff
@@ -923,6 +926,28 @@ void setPosition() { // ignored if already fixing position
   struct {
     char cmdA;
     char cmd;
+    int val;
+    char MSL;
+  } posCmd = { 'A', 'd', 0, 1 };
+
+  posCmd.cmd = 'f'; 
+  posCmd.val = bigEnd(height);
+  motoCmd(&posCmd, sizeof posCmd, 15);
+
+  posCmd.cmd = 'u';  // altitude hold height
+  motoCmd(&posCmd, sizeof posCmd); 
+
+  posCmd.cmd = 'd';
+  posCmd.val = bigEnd(latitude);
+  motoCmd(&posCmd, sizeof posCmd - 1); // no MSL
+
+  posCmd.cmd = 'e';
+  posCmd.val = bigEnd(longitude);
+  motoCmd(&posCmd, sizeof posCmd - 1);
+
+  struct {
+    char cmdA;
+    char cmd;
     int  lati;
     int  longi;
     int  height;
@@ -935,29 +960,7 @@ void setPosition() { // ignored if already fixing position
   posHoldCmd.MSL = 1;
   motoCmd(&posHoldCmd, sizeof posHoldCmd);
 
-  struct {
-    char cmdA;
-    char cmd;
-    int val;
-    char MSL;
-  } posCmd = { 'A', 'd', 0, 1 };
-
-  posCmd.cmd = 'u';  // altitude hold
-  posCmd.val = bigEnd(height);
-  motoCmd(&posCmd, sizeof posCmd);
-
-  posCmd.cmd = 'f';
-  motoCmd(&posCmd, sizeof posCmd, 15);    // slow response
-
-  posCmd.cmd = 'd';
-  posCmd.val = bigEnd(latitude);
-  motoCmd(&posCmd, sizeof posCmd - 1); // no MSL
-
-  posCmd.cmd = 'e';
-  posCmd.val = bigEnd(longitude);
-  motoCmd(&posCmd, sizeof posCmd - 1);
-
-  motoCmd("At\001", 3); //position hold on
+  motoCmd("At\001", 3); // position hold on
   motoCmd("Av\001", 3); // altitude hold on
 }
 
@@ -986,11 +989,25 @@ void setTime() {  // set date / time
 
 int numChannels = 8;  // or 6, 12  
 
-void initOncore() {
-  motoCmd("Cg\000", 3); // position fix off
-  motoCmd("Bb\000", 3, 92); // don't send satellites
+void setTRAIM() {
+  if (numChannels < 8) {
+    cmd_En[0] = 'B';
+    motoCmd(cmd_En, sizeof cmd_En, sizeof Bn_status);
+  } else motoCmd(cmd_En, sizeof cmd_En, sizeof En_status);  // messages off, enable 1 PPS
+  // printf(" %d %d %d %d", En_status.pulseStatus, En_status.solnStatus, En_s/tatus.RAIM_Status, En_status.negSawtooth);
+}
 
-  motoCmd(numChannels < 8 ? "Ba\000" : "Ea\000", 3, numChannels < 8 ? sizeof BaResponse : sizeof EaResponse); // poll mode
+void initOncore() {
+  motoCmd("Ea\000", 3, sizeof EaResponse);
+  motoCmd("Ba\000", 3, sizeof BaResponse);
+  setTRAIM(); // unsolicited messages off
+  motoCmd("Bb\000", 3, 92); // don't send satellites
+  motoCmd("Cg\000", 3); // position fix off
+
+  motoCmd("Cj", 2, 294);
+  response[bytesRead] = 0;
+  printf("%s", response + 4); // ID
+  numChannels = strstr((char*)response, "8_CH") ? 8 : 6;
 
 #if 0
   motoCmd("Cf", 2, 7); // factory defaults    returns Cg0 -- why?
@@ -1008,12 +1025,7 @@ void initOncore() {
 
   setTime();
 
-  if (numChannels < 8) {
-    cmd_En[0] = 'B';
-    motoCmd(cmd_En, sizeof cmd_En, sizeof Bn_status);
-  }
-  else motoCmd(cmd_En, sizeof cmd_En, sizeof En_status);  // enable 1 PPS
-// printf(" %d %d %d %d", En_status.pulseStatus, En_status.solnStatus, En_status.RAIM_Status, En_status.negSawtooth);
+  setTRAIM();
 }
 
 int main(int argc, char** argv) {
@@ -1033,11 +1045,6 @@ int main(int argc, char** argv) {
   setComm(9600);
 #endif
 #endif
-
-  motoCmd("Cj", 2, 294);
-  response[bytesRead] = 0;
-  printf("%s", response + 4); // ID
-  numChannels = strstr((char*)response, "8_CH") ? 8 : 6;
 
 #if 1
   initOncore();
